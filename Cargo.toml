@@ -1,0 +1,12 @@
+[package]
+name = "seredies"
+version = "0.1.0"
+authors = ["Nathan West <Lucretiel@gmail.com>"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+memchr = "2.5.0"
+serde = "1.0.118"
+thiserror = "1.0.32"
