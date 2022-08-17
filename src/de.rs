@@ -1,5 +1,6 @@
 use std::fmt::Display;
 
+use derive_new::new;
 use serde::{de, forward_to_deserialize_any};
 use thiserror::Error;
 
@@ -41,6 +42,7 @@ impl de::Error for Error {
     }
 }
 
+#[derive(new)]
 pub struct Deserializer<'a, 'de> {
     input: &'a mut &'de [u8],
 }
@@ -49,15 +51,6 @@ pub struct Deserializer<'a, 'de> {
 const MAX_BULK_LENGTH: i64 = 512 * 1024 * 1024;
 
 impl<'a, 'de> Deserializer<'a, 'de> {
-    /// Create a new deserializer. After it successfully deserializes a single
-    /// value, the input buffer will have been modified in place, with the
-    /// deserialized prefix removed.
-    #[inline]
-    #[must_use]
-    pub fn new(input: &'a mut &'de [u8]) -> Self {
-        Self { input }
-    }
-
     #[inline]
     fn apply_parser<T>(
         &mut self,
@@ -89,19 +82,16 @@ impl<'a, 'de> de::Deserializer<'de> for Deserializer<'a, 'de> {
             (Tag::BulkString, payload) => match parse::parse_number(payload)? {
                 -1 => visitor.visit_unit(),
                 length if length > MAX_BULK_LENGTH => Err(Error::Length),
-                length => {
+                length => visitor.visit_borrowed_bytes({
                     let length = length.try_into().map_err(|_| Error::Length)?;
-                    let payload = self.apply_parser(|input| parse::read_exact(length, input))?;
-                    visitor.visit_borrowed_bytes(payload)
-                }
+                    self.apply_parser(|input| parse::read_exact(length, input))?
+                }),
             },
             (Tag::Array, payload) => {
-                let length = parse::parse_number(payload)?
-                    .try_into()
-                    .map_err(|_| Error::Length)?;
-
                 let mut seq = SeqAccess {
-                    length,
+                    length: parse::parse_number(payload)?
+                        .try_into()
+                        .map_err(|_| Error::Length)?,
                     input: self.input,
                 };
 
@@ -113,6 +103,9 @@ impl<'a, 'de> de::Deserializer<'de> for Deserializer<'a, 'de> {
                     // increase the size. We know that the minimum size of a
                     // RESP value is 3 bytes, plus the array itself has a 2
                     // byte terminator.
+                    // TODO: include both a minimum and recommended byte count
+                    // (since in practice data in an array will usually be
+                    // bulk strings, which are minimum 5 bytes)
                     Err(Error::Parse(parse::Error::UnexpectedEof(len))) => {
                         Err(Error::Parse(parse::Error::UnexpectedEof(
                             len.saturating_add(seq.length.saturating_mul(3))
@@ -246,7 +239,23 @@ impl<'a, 'de> de::Deserializer<'de> for Deserializer<'a, 'de> {
     {
         match (name, variants) {
             ("Result", ["Ok", "Err"] | ["Err", "Ok"]) => {
-                visitor.visit_enum(ResultEnumAccess::new(self.input))
+                match parse::read_tag(*self.input)? {
+                    // "+OK\r\n" can be deserialized to either Result::Ok("OK") or
+                    // Result::OK(())
+                    ((Tag::SimpleString, b"OK"), input) => {
+                        *self.input = input;
+                        visitor.visit_enum(ResultAccess::new(ResultPlainOkPattern))
+                    }
+
+                    // "-ERR message\r\n" can be deserialized into:
+                    // Err("ERR message")
+                    ((Tag::Error, payload), input) => {
+                        *self.input = input;
+                        visitor.visit_enum(ResultAccess::new(ResultErrPattern::new(payload)))
+                    }
+
+                    _ => visitor.visit_enum(ResultAccess::new(ResultOkPattern::new(self))),
+                }
             }
             _ => self.deserialize_any(visitor),
         }
@@ -261,91 +270,67 @@ struct SeqAccess<'a, 'de> {
 impl<'de> de::SeqAccess<'de> for SeqAccess<'_, 'de> {
     type Error = Error;
 
+    #[inline]
     fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
     where
         T: de::DeserializeSeed<'de>,
     {
-        match self.length {
-            0 => Ok(None),
-            ref mut length => {
-                *length -= 1;
-
-                seed.deserialize(Deserializer { input: self.input })
-                    .map(Some)
-            }
-        }
+        self.length
+            .checked_sub(1)
+            .map(move |new_length| {
+                self.length = new_length;
+                seed.deserialize(Deserializer::new(self.input))
+            })
+            .transpose()
     }
 
     #[inline]
+    #[must_use]
     fn size_hint(&self) -> Option<usize> {
         Some(self.length)
     }
 }
 
-struct ResultEnumAccess<'a, 'de> {
-    input: &'a mut &'de [u8],
+trait ResultAccessPattern<'de> {
+    fn variant(&self) -> Result<(), ()>;
+    fn value<T>(self, seed: T) -> Result<T::Value, Error>
+    where
+        T: de::DeserializeSeed<'de>;
 }
 
-impl<'a, 'de> ResultEnumAccess<'a, 'de> {
-    #[inline]
-    pub fn new(input: &'a mut &'de [u8]) -> Self {
-        Self { input }
-    }
+#[derive(new)]
+struct ResultAccess<T> {
+    access: T,
 }
 
-impl<'a, 'de> de::EnumAccess<'de> for ResultEnumAccess<'a, 'de> {
+impl<'de, T: ResultAccessPattern<'de>> de::EnumAccess<'de> for ResultAccess<T> {
     type Error = Error;
-    type Variant = ResultVariantAccess<'a, 'de>;
+    type Variant = Self;
 
+    #[inline]
     fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Self::Error>
     where
         V: de::DeserializeSeed<'de>,
     {
-        match parse::read_tag(*self.input)? {
-            // "-ERRORCODE message\r\n" can be deserialized into:
-            // Err("ERRORCODE message")
-            // Err(ErrorKind::ERRORCODE("message"))
-            ((Tag::Error, payload), input) => {
-                *self.input = input;
-
-                seed.deserialize(de::value::BorrowedStrDeserializer::new("Err"))
-                    .map(|value| (value, ResultVariantAccess::ErrorValue { payload }))
-            }
-            // "+OK\r\n" can be deserialized to either Result::Ok("OK") or
-            // Result::OK(())
-            ((Tag::SimpleString, b"OK"), input) => {
-                *self.input = input;
-                seed.deserialize(de::value::BorrowedStrDeserializer::new("Ok"))
-                    .map(|value| (value, ResultVariantAccess::PlainOk))
-            }
-            _ => seed
-                .deserialize(de::value::BorrowedStrDeserializer::new("Ok"))
-                .map(|value| (value, ResultVariantAccess::Ok { input: self.input })),
-        }
+        seed.deserialize(de::value::BorrowedStrDeserializer::new(
+            match self.access.variant() {
+                Ok(()) => "Ok",
+                Err(()) => "Err",
+            },
+        ))
+        .map(|value| (value, self))
     }
 }
 
-enum ResultVariantAccess<'a, 'de> {
-    ErrorValue { payload: &'de [u8] },
-    PlainOk,
-    Ok { input: &'a mut &'de [u8] },
-}
-
-impl<'de> de::VariantAccess<'de> for ResultVariantAccess<'_, 'de> {
+impl<'de, T: ResultAccessPattern<'de>> de::VariantAccess<'de> for ResultAccess<T> {
     type Error = Error;
 
     #[inline]
-    fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value, Self::Error>
+    fn newtype_variant_seed<S>(self, seed: S) -> Result<S::Value, Self::Error>
     where
-        T: de::DeserializeSeed<'de>,
+        S: de::DeserializeSeed<'de>,
     {
-        match self {
-            ResultVariantAccess::Ok { input } => seed.deserialize(Deserializer::new(input)),
-            ResultVariantAccess::PlainOk => seed.deserialize(PlainOkDeserializer),
-            ResultVariantAccess::ErrorValue { payload } => {
-                seed.deserialize(ResultErrPayloadDeserializer { payload })
-            }
-        }
+        self.access.value(seed)
     }
 
     #[inline]
@@ -374,9 +359,26 @@ impl<'de> de::VariantAccess<'de> for ResultVariantAccess<'_, 'de> {
     }
 }
 
-struct PlainOkDeserializer;
+#[derive(new)]
+struct ResultPlainOkPattern;
 
-impl<'de> de::Deserializer<'de> for PlainOkDeserializer {
+impl<'de> ResultAccessPattern<'de> for ResultPlainOkPattern {
+    #[inline]
+    #[must_use]
+    fn variant(&self) -> Result<(), ()> {
+        Ok(())
+    }
+
+    #[inline]
+    fn value<T>(self, seed: T) -> Result<T::Value, Error>
+    where
+        T: de::DeserializeSeed<'de>,
+    {
+        seed.deserialize(self)
+    }
+}
+
+impl<'de> de::Deserializer<'de> for ResultPlainOkPattern {
     type Error = Error;
 
     forward_to_deserialize_any! {
@@ -402,123 +404,257 @@ impl<'de> de::Deserializer<'de> for PlainOkDeserializer {
     }
 }
 
-struct ResultErrPayloadDeserializer<'de> {
-    payload: &'de [u8],
+#[derive(new)]
+struct ResultOkPattern<'a, 'de> {
+    deserializer: Deserializer<'a, 'de>,
 }
 
-impl<'de> de::Deserializer<'de> for ResultErrPayloadDeserializer<'de> {
-    type Error = Error;
-
-    forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
-        bytes byte_buf option unit unit_struct newtype_struct seq tuple
-        tuple_struct map struct identifier ignored_any
+impl<'de> ResultAccessPattern<'de> for ResultOkPattern<'_, 'de> {
+    #[inline]
+    #[must_use]
+    fn variant(&self) -> Result<(), ()> {
+        Ok(())
     }
 
     #[inline]
-    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    fn value<T>(self, seed: T) -> Result<T::Value, Error>
     where
-        V: de::Visitor<'de>,
+        T: de::DeserializeSeed<'de>,
     {
-        visitor.visit_borrowed_bytes(self.payload)
-    }
-
-    #[inline]
-    fn deserialize_enum<V>(
-        self,
-        _name: &'static str,
-        _variants: &'static [&'static str],
-        visitor: V,
-    ) -> Result<V::Value, Self::Error>
-    where
-        V: de::Visitor<'de>,
-    {
-        visitor.visit_enum(ResultErrCodeEnumAccess::new(self.payload))
+        seed.deserialize(self.deserializer)
     }
 }
 
-struct ResultErrCodeEnumAccess<'de> {
-    code: &'de [u8],
+#[derive(new)]
+struct ResultErrPattern<'de> {
     message: &'de [u8],
 }
 
-impl<'de> ResultErrCodeEnumAccess<'de> {
+impl<'de> ResultAccessPattern<'de> for ResultErrPattern<'de> {
     #[inline]
-    pub fn new(payload: &'de [u8]) -> Self {
-        let (code, message) = split_at_pred(payload, |&b| b.is_ascii_whitespace());
-        let (_, message) = split_at_pred(message, |&b| !b.is_ascii_whitespace());
-
-        Self { code, message }
-    }
-}
-
-impl<'de> de::EnumAccess<'de> for ResultErrCodeEnumAccess<'de> {
-    type Error = Error;
-    type Variant = ResultErrMessageVariantAccess<'de>;
-
-    #[inline]
-    fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Self::Error>
-    where
-        V: de::DeserializeSeed<'de>,
-    {
-        seed.deserialize(de::value::BorrowedBytesDeserializer::new(self.code))
-            .map(|value| (value, ResultErrMessageVariantAccess::new(self.message)))
-    }
-}
-
-struct ResultErrMessageVariantAccess<'de> {
-    message: &'de [u8],
-}
-
-impl<'de> ResultErrMessageVariantAccess<'de> {
-    #[inline]
-    pub fn new(message: &'de [u8]) -> Self {
-        Self { message }
-    }
-}
-
-impl<'de> de::VariantAccess<'de> for ResultErrMessageVariantAccess<'de> {
-    type Error = Error;
-
-    #[inline]
-    fn unit_variant(self) -> Result<(), Self::Error> {
-        match self.message {
-            &[] => Ok(()),
-            _ => Err(Error::InvalidErrorCode),
-        }
+    #[must_use]
+    fn variant(&self) -> Result<(), ()> {
+        Err(())
     }
 
     #[inline]
-    fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value, Self::Error>
+    fn value<T>(self, seed: T) -> Result<T::Value, Error>
     where
         T: de::DeserializeSeed<'de>,
     {
         seed.deserialize(de::value::BorrowedBytesDeserializer::new(self.message))
     }
-
-    #[inline]
-    fn tuple_variant<V>(self, _len: usize, _visitor: V) -> Result<V::Value, Self::Error>
-    where
-        V: de::Visitor<'de>,
-    {
-        Err(Error::InvalidErrorCode)
-    }
-
-    #[inline]
-    fn struct_variant<V>(
-        self,
-        _fields: &'static [&'static str],
-        _visitor: V,
-    ) -> Result<V::Value, Self::Error>
-    where
-        V: de::Visitor<'de>,
-    {
-        Err(Error::InvalidErrorCode)
-    }
 }
 
-// Split an input in half at the first item that matches a predicate.
-#[inline]
-fn split_at_pred<T>(input: &[T], pred: impl Fn(&T) -> bool) -> (&[T], &[T]) {
-    input.split_at(input.iter().position(pred).unwrap_or(input.len()))
+#[cfg(test)]
+mod tests {
+    use std::fmt::Debug;
+    use std::iter;
+
+    use cool_asserts::assert_matches;
+    use itertools::Itertools as _;
+    use serde::Deserialize as _;
+
+    use super::*;
+
+    #[derive(PartialEq, Eq, Debug)]
+    enum Data<'a> {
+        Null,
+        String(&'a [u8]),
+        Integer(i64),
+        Array(Vec<Data<'a>>),
+    }
+
+    use Data::Null;
+
+    impl<'a> From<&'a [u8]> for Data<'a> {
+        fn from(string: &'a [u8]) -> Self {
+            Self::String(string)
+        }
+    }
+
+    impl<'a> From<&'a str> for Data<'a> {
+        fn from(string: &'a str) -> Self {
+            string.as_bytes().into()
+        }
+    }
+
+    impl From<i64> for Data<'_> {
+        fn from(value: i64) -> Self {
+            Self::Integer(value)
+        }
+    }
+
+    impl<'a, T: Into<Data<'a>>, const N: usize> From<[T; N]> for Data<'a> {
+        fn from(array: [T; N]) -> Self {
+            Self::Array(array.into_iter().map(|value| value.into()).collect())
+        }
+    }
+
+    impl<'de> de::Deserialize<'de> for Data<'de> {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            struct Visitor;
+
+            impl<'de> de::Visitor<'de> for Visitor {
+                type Value = Data<'de>;
+
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    write!(f, "a byte string, integer, or array")
+                }
+
+                fn visit_borrowed_bytes<E>(self, v: &'de [u8]) -> Result<Self::Value, E>
+                where
+                    E: de::Error,
+                {
+                    Ok(Data::String(v))
+                }
+
+                fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+                where
+                    E: de::Error,
+                {
+                    Ok(Data::Integer(v))
+                }
+
+                fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+                where
+                    A: de::SeqAccess<'de>,
+                {
+                    iter::from_fn(move || seq.next_element().transpose())
+                        .try_collect()
+                        .map(Data::Array)
+                }
+
+                fn visit_unit<E>(self) -> Result<Self::Value, E>
+                where
+                    E: de::Error,
+                {
+                    Ok(Data::Null)
+                }
+            }
+
+            deserializer.deserialize_any(Visitor)
+        }
+    }
+
+    fn test_basic_deserialize<'a>(
+        input: &'a (impl AsRef<[u8]> + ?Sized),
+        expected: impl Into<Data<'a>>,
+    ) {
+        let mut input = input.as_ref();
+        let deserializer = Deserializer::new(&mut input);
+        let result = Data::deserialize(deserializer).expect("Failed to deserialize");
+        assert_eq!(result, expected.into());
+        assert!(input.is_empty());
+    }
+
+    macro_rules! data_tests {
+        ($(
+            $name:ident: $value:literal => $expected:expr;
+        )*) => {
+            $(
+                #[test]
+                fn $name() {
+                    test_basic_deserialize($value, $expected);
+                }
+            )*
+        }
+    }
+
+    data_tests! {
+        simple_string: "+Hello, World\r\n" => "Hello, World";
+        empty_simple_string: "+\r\n" => "";
+        integer: ":1000\r\n" => 1000;
+        negative_int: ":-1000\r\n" => -1000;
+        bulk_string: "$5\r\nhello\r\n" => "hello";
+        empty_bulk_string: "$0\r\n\r\n" => "";
+        null: "$-1\r\n" => Null;
+        weird_null: "$-001\r\n" => Null;
+        array: "*2\r\n$5\r\nhello\r\n$5\r\nworld\r\n" => ["hello", "world"];
+        heterogeneous: b"*3\r\n:10\r\n$5\r\nhello\r\n$-1\r\n" => [Data::Integer(10), Data::String(b"hello"), Null];
+    }
+
+    #[test]
+    fn test_bool() {
+        let input = b":1\r\n";
+        let mut input = &input[..];
+        let deserializer = Deserializer::new(&mut input);
+        assert!(bool::deserialize(deserializer).expect("failed to deserialize"));
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn test_options() {
+        let input = b"*3\r\n:3\r\n$-1\r\n$5\r\nhello\r\n";
+        let mut input = &input[..];
+        let deserializer = Deserializer::new(&mut input);
+        let result: Vec<Option<Data<'_>>> =
+            Vec::deserialize(deserializer).expect("Failed to deserialize");
+
+        assert_eq!(
+            result,
+            [Some(Data::Integer(3)), None, Some(Data::String(b"hello"))]
+        );
+
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn test_error() {
+        let input = b"-ERROR bad data\r\n";
+        let mut input = &input[..];
+        let deserializer = Deserializer::new(&mut input);
+        let result =
+            i32::deserialize(deserializer).expect_err("deserialization unexpectedly succeeded");
+
+        assert_matches!(result, Error::Redis(message) => assert_eq!(message, b"ERROR bad data"));
+    }
+
+    fn test_result_deserializer<'a, T, E>(
+        input: &'a (impl AsRef<[u8]> + ?Sized),
+        expected: Result<T, E>,
+    ) where
+        T: de::Deserialize<'a> + Eq + Debug,
+        E: de::Deserialize<'a> + Eq + Debug,
+    {
+        let mut input = input.as_ref();
+        let deserializer = Deserializer::new(&mut input);
+        let result: Result<T, E> =
+            Result::deserialize(deserializer).expect("Failed to deserialize");
+        assert_eq!(result, expected);
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn test_result_ok() {
+        test_result_deserializer::<&str, String>(b"$5\r\nhello\r\n", Ok("hello"));
+    }
+
+    #[test]
+    fn test_result_some() {
+        test_result_deserializer::<Option<&str>, String>(b"$5\r\nhello\r\n", Ok(Some("hello")));
+    }
+
+    #[test]
+    fn test_result_none() {
+        test_result_deserializer::<Option<&str>, String>(b"$-1\r\n", Ok(None));
+    }
+
+    #[test]
+    fn test_result_unit() {
+        test_result_deserializer::<(), String>(b"+OK\r\n", Ok(()));
+    }
+
+    #[test]
+    fn test_result_unit_str() {
+        test_result_deserializer::<String, String>(b"+OK\r\n", Ok("OK".to_owned()));
+    }
+
+    #[test]
+    fn test_result_error_msg() {
+        test_result_deserializer::<&str, &str>(b"-ERROR bad data\r\n", Err("ERROR bad data"));
+    }
 }
