@@ -12,7 +12,8 @@ enum ResultVariant {
 }
 
 trait ResultAccessPattern<'de> {
-    fn variant(&self) -> ResultVariant;
+    const VARIANT: ResultVariant;
+
     fn value<T>(self, seed: T) -> Result<T::Value, Error>
     where
         T: de::DeserializeSeed<'de>;
@@ -63,12 +64,10 @@ impl<'de, T: ResultAccessPattern<'de>> de::EnumAccess<'de> for ResultAccess<T> {
     where
         V: de::DeserializeSeed<'de>,
     {
-        seed.deserialize(de::value::BorrowedStrDeserializer::new(
-            match self.access.variant() {
-                ResultVariant::Ok => "Ok",
-                ResultVariant::Err => "Err",
-            },
-        ))
+        seed.deserialize(de::value::BorrowedStrDeserializer::new(match T::VARIANT {
+            ResultVariant::Ok => "Ok",
+            ResultVariant::Err => "Err",
+        }))
         .map(|value| (value, self))
     }
 }
@@ -122,11 +121,7 @@ impl<'de, T: ResultAccessPattern<'de>> de::VariantAccess<'de> for ResultAccess<T
 pub struct ResultPlainOkPattern;
 
 impl<'de> ResultAccessPattern<'de> for ResultPlainOkPattern {
-    #[inline]
-    #[must_use]
-    fn variant(&self) -> ResultVariant {
-        ResultVariant::Ok
-    }
+    const VARIANT: ResultVariant = ResultVariant::Ok;
 
     #[inline]
     fn value<T>(self, seed: T) -> Result<T::Value, Error>
@@ -168,11 +163,7 @@ pub struct ResultOkPattern<'a, 'de> {
 }
 
 impl<'de> ResultAccessPattern<'de> for ResultOkPattern<'_, 'de> {
-    #[inline]
-    #[must_use]
-    fn variant(&self) -> ResultVariant {
-        ResultVariant::Ok
-    }
+    const VARIANT: ResultVariant = ResultVariant::Ok;
 
     #[inline]
     fn value<T>(self, seed: T) -> Result<T::Value, Error>
@@ -188,11 +179,7 @@ pub struct ResultErrPattern<'de> {
 }
 
 impl<'de> ResultAccessPattern<'de> for ResultErrPattern<'de> {
-    #[inline]
-    #[must_use]
-    fn variant(&self) -> ResultVariant {
-        ResultVariant::Err
-    }
+    const VARIANT: ResultVariant = ResultVariant::Err;
 
     #[inline]
     fn value<T>(self, seed: T) -> Result<T::Value, Error>
