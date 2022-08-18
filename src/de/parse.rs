@@ -65,14 +65,19 @@ pub fn read_header(input: &[u8]) -> ParseResult<Header<'_>> {
     Ok((Header { tag, payload }, input))
 }
 
+#[inline]
+#[must_use]
 fn try_split_at(input: &[u8], idx: usize) -> Option<(&[u8], &[u8])> {
     input.get(..idx).map(|head| (head, &input[idx..]))
 }
 
 /// Read a chunk of a specific length, followed by endline
 pub fn read_exact(length: usize, input: &[u8]) -> ParseResult<'_, &[u8]> {
-    let (payload, input) =
-        try_split_at(input, length).ok_or(Error::UnexpectedEof(length + 2 - input.len()))?;
+    let (payload, input) = try_split_at(input, length).ok_or_else(|| {
+        // We know for sure that `length > input.len()` (because try_split_at
+        // would have succeeded otherwise), but we still need to check the +2
+        Error::UnexpectedEof((length - input.len()).saturating_add(2))
+    })?;
 
     let ((), input) = read_endline(input)?;
 
