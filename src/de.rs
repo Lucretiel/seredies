@@ -41,6 +41,8 @@ pub enum Error {
 }
 
 impl de::Error for Error {
+    #[inline]
+    #[must_use]
     fn custom<T>(msg: T) -> Self
     where
         T: Display,
@@ -49,21 +51,30 @@ impl de::Error for Error {
     }
 }
 
+#[inline]
 fn apply_parser<'de, T>(
     input: &mut &'de [u8],
     parser: impl FnOnce(&'de [u8]) -> ParseResult<'de, T>,
 ) -> Result<T, parse::Error> {
-    parser(*input).map(|(value, tail)| {
+    parser(input).map(|(value, tail)| {
         *input = tail;
         value
     })
 }
 
+/// Trait that abstracts the header read operation. At various points during
+/// a deserialize, the Deserializer might either need to parse a header, or
+/// might already have one from a parse operation. For example, when
+/// deserializing an `Option`, if the value is NOT null, the parsed header
+/// is retained by the deserializer passed into `deserialize_some`. This trait
+/// abstracts over the presence or absence of a parsed header.
 pub trait ReadHeader<'de>: Sized {
+    /// Read a header, possibly from the `input`.
     fn read_header(self, input: &mut &'de [u8]) -> Result<Header<'de>, parse::Error>;
 }
 
 impl<'de> ReadHeader<'de> for Header<'de> {
+    /// A `Header` can simply return itself without touching the input
     #[inline]
     fn read_header(self, _input: &mut &'de [u8]) -> Result<Header<'de>, parse::Error> {
         Ok(self)
@@ -73,6 +84,7 @@ impl<'de> ReadHeader<'de> for Header<'de> {
 pub struct ParseHeader;
 
 impl<'de> ReadHeader<'de> for ParseHeader {
+    /// We don't have a header; we must try to read one from the input.
     #[inline]
     fn read_header(self, input: &mut &'de [u8]) -> Result<Header<'de>, parse::Error> {
         apply_parser(input, parse::read_header)
@@ -112,6 +124,7 @@ impl<'a, 'de, H: ReadHeader<'de>> BaseDeserializer<'a, 'de, H> {
     /// tag byte, followed by some kind of payload (which may not contain \r
     /// or \n), followed by \r\n. The header might have already been read
     /// from a previous parse, in which case it'll be available in self.header.
+    #[inline]
     fn read_header(self) -> Result<PreParsedDeserializer<'a, 'de>, parse::Error> {
         let input = self.input;
 
@@ -347,10 +360,8 @@ impl<'de> de::SeqAccess<'de> for SeqAccess<'_, 'de> {
     {
         self.length
             .checked_sub(1)
-            .map(move |new_length| {
-                self.length = new_length;
-                seed.deserialize(Deserializer::new(self.input))
-            })
+            .map(|new_length| self.length = new_length)
+            .map(|()| seed.deserialize(Deserializer::new(self.input)))
             .transpose()
     }
 

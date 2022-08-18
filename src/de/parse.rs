@@ -71,8 +71,8 @@ fn try_split_at(input: &[u8], idx: usize) -> Option<(&[u8], &[u8])> {
 
 /// Read a chunk of a specific length, followed by endline
 pub fn read_exact(length: usize, input: &[u8]) -> ParseResult<'_, &[u8]> {
-    let (payload, input) = try_split_at(input, length)
-        .ok_or_else(|| Error::UnexpectedEof(length + 2 - input.len()))?;
+    let (payload, input) =
+        try_split_at(input, length).ok_or(Error::UnexpectedEof(length + 2 - input.len()))?;
 
     let ((), input) = read_endline(input)?;
 
