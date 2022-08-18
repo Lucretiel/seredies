@@ -29,7 +29,7 @@ pub enum Tag {
 
 pub type ParseResult<'a, O> = Result<(O, &'a [u8]), Error>;
 
-/// Read a single \r\n from the input
+/// Read a single \r\n from the input.
 pub fn read_endline(input: &[u8]) -> ParseResult<'_, ()> {
     match input {
         [b'\r', b'\n', input @ ..] => Ok(((), input)),
