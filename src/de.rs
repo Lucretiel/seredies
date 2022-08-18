@@ -1,36 +1,43 @@
+mod parse;
+mod result;
+
 use std::fmt::Display;
 
-use derive_new::new;
 use serde::{de, forward_to_deserialize_any};
 use thiserror::Error;
 
-use crate::parse::{self, ParseResult, Tag};
+use parse::{ParseResult, Tag};
+use result::ResultAccess;
 
+use self::parse::Header;
+
+/// Errors that can occur while deserializing RESP data
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum Error {
+    /// There was an error during parsing (such as a \r without a \n)
     #[error("parsing error")]
     Parse(#[from] parse::Error),
 
-    #[error("successfully deserialized a Redis Error containing this message")]
-    Redis(Vec<u8>),
-
+    /// The length of an array or bulk string was out of bounds. It might
+    /// have been negative, or exceeded the 512MB limit for bulk strings.
     #[error("an array or bulk string length was out of bounds")]
     Length,
 
-    #[error("a sequence deserializer didn't consume every element in the array")]
+    /// The `Deserialize` type successfully deserialized from a Redis array,
+    /// but didn't consume the whole thing.
+    #[error("the `Deserialize` type didn't consume the entire array")]
     UnfinishedArray,
 
-    #[error("tried to serialize a Result with a non-newtype variant")]
-    InvalidResultDeserialize,
-
-    #[error("something went wrong while deserializing the message of a redis error")]
-    InvalidErrorCode,
-
-    #[error("tried to deserialize an enum (consider using serde(variant_identifier) for string-like enums)")]
-    EnumRequested,
-
+    /// There was an error from the `Deserialize` type
     #[error("error from Deserialize type: {0}")]
     Custom(String),
+
+    /// We *successfully* deserialized a Redis Error value (with the `-` tag)
+    /// See the module docs on `Result` deserialization for how to avoid this
+    /// error.
+    #[error("successfully deserialized a Redis Error containing this message")]
+    Redis(Vec<u8>),
 }
 
 impl de::Error for Error {
@@ -42,27 +49,79 @@ impl de::Error for Error {
     }
 }
 
-#[derive(new)]
-pub struct Deserializer<'a, 'de> {
+fn apply_parser<'de, T>(
+    input: &mut &'de [u8],
+    parser: impl FnOnce(&'de [u8]) -> ParseResult<'de, T>,
+) -> Result<T, parse::Error> {
+    parser(*input).map(|(value, tail)| {
+        *input = tail;
+        value
+    })
+}
+
+pub trait ReadHeader<'de>: Sized {
+    fn read_header(self, input: &mut &'de [u8]) -> Result<Header<'de>, parse::Error>;
+}
+
+impl<'de> ReadHeader<'de> for Header<'de> {
+    #[inline]
+    fn read_header(self, _input: &mut &'de [u8]) -> Result<Header<'de>, parse::Error> {
+        Ok(self)
+    }
+}
+
+pub struct ParseHeader;
+
+impl<'de> ReadHeader<'de> for ParseHeader {
+    #[inline]
+    fn read_header(self, input: &mut &'de [u8]) -> Result<Header<'de>, parse::Error> {
+        apply_parser(input, parse::read_header)
+    }
+}
+
+pub struct BaseDeserializer<'a, 'de, H> {
+    header: H,
     input: &'a mut &'de [u8],
+}
+
+pub type Deserializer<'a, 'de> = BaseDeserializer<'a, 'de, ParseHeader>;
+type PreParsedDeserializer<'a, 'de> = BaseDeserializer<'a, 'de, Header<'de>>;
+
+impl<'a, 'de> Deserializer<'a, 'de> {
+    #[inline]
+    pub fn new(input: &'a mut &'de [u8]) -> Self {
+        Self {
+            input,
+            header: ParseHeader,
+        }
+    }
+}
+
+impl<'a, 'de> PreParsedDeserializer<'a, 'de> {
+    #[inline]
+    fn new(header: Header<'de>, input: &'a mut &'de [u8]) -> Self {
+        Self { input, header }
+    }
 }
 
 // Bulk strings can be up to 512 MB
 const MAX_BULK_LENGTH: i64 = 512 * 1024 * 1024;
 
-impl<'a, 'de> Deserializer<'a, 'de> {
-    #[inline]
-    fn apply_parser<T>(
-        &mut self,
-        parser: impl FnOnce(&'de [u8]) -> ParseResult<'de, T>,
-    ) -> Result<T, parse::Error> {
-        let (value, input) = parser(*self.input)?;
-        *self.input = input;
-        Ok(value)
+impl<'a, 'de, H: ReadHeader<'de>> BaseDeserializer<'a, 'de, H> {
+    /// Read the header from a RESP value. The header consists of a single
+    /// tag byte, followed by some kind of payload (which may not contain \r
+    /// or \n), followed by \r\n. The header might have already been read
+    /// from a previous parse, in which case it'll be available in self.header.
+    fn read_header(self) -> Result<PreParsedDeserializer<'a, 'de>, parse::Error> {
+        let input = self.input;
+
+        self.header
+            .read_header(input)
+            .map(|header| PreParsedDeserializer::new(header, input))
     }
 }
 
-impl<'a, 'de> de::Deserializer<'de> for Deserializer<'a, 'de> {
+impl<'de, P: ReadHeader<'de>> de::Deserializer<'de> for BaseDeserializer<'_, 'de, P> {
     type Error = Error;
 
     forward_to_deserialize_any! {
@@ -71,28 +130,42 @@ impl<'a, 'de> de::Deserializer<'de> for Deserializer<'a, 'de> {
         tuple_struct map struct identifier ignored_any
     }
 
-    fn deserialize_any<V>(mut self, visitor: V) -> Result<V::Value, Self::Error>
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: de::Visitor<'de>,
     {
-        match self.apply_parser(parse::read_tag)? {
-            (Tag::SimpleString, payload) => visitor.visit_borrowed_bytes(payload),
-            (Tag::Error, payload) => Err(Error::Redis(payload.to_owned())),
-            (Tag::Integer, payload) => visitor.visit_i64(parse::parse_number(payload)?),
-            (Tag::BulkString, payload) => match parse::parse_number(payload)? {
+        let parsed = self.read_header()?;
+
+        match parsed.header.tag {
+            // Simple Strings are handled as byte arrays
+            Tag::SimpleString => visitor.visit_borrowed_bytes(parsed.header.payload),
+
+            // Errors are handled by default as actual deserialization errors.
+            // (see deserialize_enum for how to circumvent this)
+            Tag::Error => Err(Error::Redis(parsed.header.payload.to_owned())),
+
+            // Integers are parsed then handled as i64. All Redis integers are
+            // guaranteed to fit in a signed 64 bit int.
+            Tag::Integer => visitor.visit_i64(parse::parse_number(parsed.header.payload)?),
+
+            // Bulk strings are handled as byte arrays, just like Simple
+            // Strings. `$-1\r\n` is handled as a null.
+            Tag::BulkString => match parse::parse_number(parsed.header.payload)? {
                 -1 => visitor.visit_unit(),
                 length if length > MAX_BULK_LENGTH => Err(Error::Length),
                 length => visitor.visit_borrowed_bytes({
                     let length = length.try_into().map_err(|_| Error::Length)?;
-                    self.apply_parser(|input| parse::read_exact(length, input))?
+                    apply_parser(parsed.input, |input| parse::read_exact(length, input))?
                 }),
             },
-            (Tag::Array, payload) => {
+
+            // Arrays are handled as serde sequences.
+            Tag::Array => {
                 let mut seq = SeqAccess {
-                    length: parse::parse_number(payload)?
+                    input: parsed.input,
+                    length: parse::parse_number(parsed.header.payload)?
                         .try_into()
                         .map_err(|_| Error::Length)?,
-                    input: self.input,
                 };
 
                 match visitor.visit_seq(&mut seq) {
@@ -205,13 +278,13 @@ impl<'a, 'de> de::Deserializer<'de> for Deserializer<'a, 'de> {
     where
         V: de::Visitor<'de>,
     {
-        match parse::read_tag(*self.input)? {
-            ((Tag::BulkString, payload), input) if parse::parse_number(payload)? == -1 => {
-                *self.input = input;
+        let parsed = self.read_header()?;
+
+        match parsed.header.tag {
+            Tag::BulkString if parse::parse_number(parsed.header.payload)? == -1 => {
                 visitor.visit_none()
             }
-
-            _ => visitor.visit_some(self),
+            _ => visitor.visit_some(parsed),
         }
     }
 
@@ -239,22 +312,19 @@ impl<'a, 'de> de::Deserializer<'de> for Deserializer<'a, 'de> {
     {
         match (name, variants) {
             ("Result", ["Ok", "Err"] | ["Err", "Ok"]) => {
-                match parse::read_tag(*self.input)? {
+                let parsed = self.read_header()?;
+
+                match (parsed.header.tag, parsed.header.payload) {
                     // "+OK\r\n" can be deserialized to either Result::Ok("OK") or
                     // Result::OK(())
-                    ((Tag::SimpleString, b"OK"), input) => {
-                        *self.input = input;
-                        visitor.visit_enum(ResultAccess::new(ResultPlainOkPattern))
-                    }
+                    (Tag::SimpleString, b"OK") => visitor.visit_enum(ResultAccess::new_plain_ok()),
 
                     // "-ERR message\r\n" can be deserialized into:
                     // Err("ERR message")
-                    ((Tag::Error, payload), input) => {
-                        *self.input = input;
-                        visitor.visit_enum(ResultAccess::new(ResultErrPattern::new(payload)))
-                    }
+                    (Tag::Error, message) => visitor.visit_enum(ResultAccess::new_err(message)),
 
-                    _ => visitor.visit_enum(ResultAccess::new(ResultOkPattern::new(self))),
+                    // For everything else, deserialize inline as a Result::Ok
+                    _ => visitor.visit_enum(ResultAccess::new_ok(parsed)),
                 }
             }
             _ => self.deserialize_any(visitor),
@@ -288,161 +358,6 @@ impl<'de> de::SeqAccess<'de> for SeqAccess<'_, 'de> {
     #[must_use]
     fn size_hint(&self) -> Option<usize> {
         Some(self.length)
-    }
-}
-
-trait ResultAccessPattern<'de> {
-    fn variant(&self) -> Result<(), ()>;
-    fn value<T>(self, seed: T) -> Result<T::Value, Error>
-    where
-        T: de::DeserializeSeed<'de>;
-}
-
-#[derive(new)]
-struct ResultAccess<T> {
-    access: T,
-}
-
-impl<'de, T: ResultAccessPattern<'de>> de::EnumAccess<'de> for ResultAccess<T> {
-    type Error = Error;
-    type Variant = Self;
-
-    #[inline]
-    fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Self::Error>
-    where
-        V: de::DeserializeSeed<'de>,
-    {
-        seed.deserialize(de::value::BorrowedStrDeserializer::new(
-            match self.access.variant() {
-                Ok(()) => "Ok",
-                Err(()) => "Err",
-            },
-        ))
-        .map(|value| (value, self))
-    }
-}
-
-impl<'de, T: ResultAccessPattern<'de>> de::VariantAccess<'de> for ResultAccess<T> {
-    type Error = Error;
-
-    #[inline]
-    fn newtype_variant_seed<S>(self, seed: S) -> Result<S::Value, Self::Error>
-    where
-        S: de::DeserializeSeed<'de>,
-    {
-        self.access.value(seed)
-    }
-
-    #[inline]
-    fn unit_variant(self) -> Result<(), Self::Error> {
-        Err(Error::InvalidResultDeserialize)
-    }
-
-    #[inline]
-    fn tuple_variant<V>(self, _len: usize, _visitor: V) -> Result<V::Value, Self::Error>
-    where
-        V: de::Visitor<'de>,
-    {
-        Err(Error::InvalidResultDeserialize)
-    }
-
-    #[inline]
-    fn struct_variant<V>(
-        self,
-        _fields: &'static [&'static str],
-        _visitor: V,
-    ) -> Result<V::Value, Self::Error>
-    where
-        V: de::Visitor<'de>,
-    {
-        Err(Error::InvalidResultDeserialize)
-    }
-}
-
-#[derive(new)]
-struct ResultPlainOkPattern;
-
-impl<'de> ResultAccessPattern<'de> for ResultPlainOkPattern {
-    #[inline]
-    #[must_use]
-    fn variant(&self) -> Result<(), ()> {
-        Ok(())
-    }
-
-    #[inline]
-    fn value<T>(self, seed: T) -> Result<T::Value, Error>
-    where
-        T: de::DeserializeSeed<'de>,
-    {
-        seed.deserialize(self)
-    }
-}
-
-impl<'de> de::Deserializer<'de> for ResultPlainOkPattern {
-    type Error = Error;
-
-    forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
-        bytes byte_buf option unit_struct newtype_struct seq tuple
-        tuple_struct map struct identifier ignored_any enum
-    }
-
-    #[inline]
-    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
-    where
-        V: de::Visitor<'de>,
-    {
-        visitor.visit_borrowed_bytes(b"OK")
-    }
-
-    #[inline]
-    fn deserialize_unit<V>(self, visitor: V) -> Result<V::Value, Self::Error>
-    where
-        V: de::Visitor<'de>,
-    {
-        visitor.visit_unit()
-    }
-}
-
-#[derive(new)]
-struct ResultOkPattern<'a, 'de> {
-    deserializer: Deserializer<'a, 'de>,
-}
-
-impl<'de> ResultAccessPattern<'de> for ResultOkPattern<'_, 'de> {
-    #[inline]
-    #[must_use]
-    fn variant(&self) -> Result<(), ()> {
-        Ok(())
-    }
-
-    #[inline]
-    fn value<T>(self, seed: T) -> Result<T::Value, Error>
-    where
-        T: de::DeserializeSeed<'de>,
-    {
-        seed.deserialize(self.deserializer)
-    }
-}
-
-#[derive(new)]
-struct ResultErrPattern<'de> {
-    message: &'de [u8],
-}
-
-impl<'de> ResultAccessPattern<'de> for ResultErrPattern<'de> {
-    #[inline]
-    #[must_use]
-    fn variant(&self) -> Result<(), ()> {
-        Err(())
-    }
-
-    #[inline]
-    fn value<T>(self, seed: T) -> Result<T::Value, Error>
-    where
-        T: de::DeserializeSeed<'de>,
-    {
-        seed.deserialize(de::value::BorrowedBytesDeserializer::new(self.message))
     }
 }
 
