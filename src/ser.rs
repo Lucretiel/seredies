@@ -1,3 +1,5 @@
+mod primitives;
+
 use std::{convert::TryInto, io};
 
 use serde::{ser, Serializer as _};
@@ -644,7 +646,7 @@ impl<W: io::Write> ser::Serializer for SerializeResultError<'_, W> {
     where
         T: serde::Serialize,
     {
-        
+        todo!()
     }
 
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
