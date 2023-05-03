@@ -9,7 +9,7 @@ edition = "2021"
 [dependencies]
 itertools = "0.10.3"
 memchr = "2.5.0"
-serde = "1.0.118"
+serde = { version = "1.0.118", default-features = false, features = ["derive"] }
 thiserror = "1.0.32"
 
 [dev-dependencies]

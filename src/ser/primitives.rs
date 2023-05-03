@@ -2,9 +2,7 @@
 Primitive writers for RESP components
 */
 
-use std::{io, slice};
-
-pub fn write_header()
+use std::io;
 
 #[inline]
 #[must_use]
@@ -16,33 +14,9 @@ struct NewlineRejector<W> {
     inner: W,
 }
 
-fn advance_buffers<'a>(
-    buffers: &mut &mut [io::IoSlice<'a>],
-    mut amount: usize,
-    mut save: Option<io::IoSlice<'a>>,
-) -> Option<io::IoSlice<'_>> {
-    while let Some((head, tail)) = buffers.split_first_mut() {
-        if head.len() <= amount {
-            amount -= head.len();
-
-            if let Some(saved) = save.take() {
-                *head = saved;
-            }
-
-            *buffers = tail;
-        } else if amount == 0 {
-            return save;
-        } else {
-            let save = save.unwrap_or(*head);
-            *head = io::IoSlice::new(&head[amount..]);
-            return Some(save);
-        }
-    }
-}
-
-fn write_all_vectored(
+pub fn write_all_vectored<'a>(
     dest: &mut impl io::Write,
-    mut buffers: &mut [io::IoSlice<'_>],
+    mut buffers: &'a mut [io::IoSlice<'a>],
 ) -> io::Result<()> {
     let mut buffers = BufferManager::new(buffers);
 
@@ -63,7 +37,7 @@ struct BufferManager<'a> {
     saved: Option<io::IoSlice<'a>>,
 }
 
-impl BufferManager<'a> {
+impl<'a> BufferManager<'a> {
     pub fn new(buffers: &'a mut [io::IoSlice<'a>]) -> Self {
         // strip empty buffers
         let first_non_empty = buffers
@@ -87,7 +61,7 @@ impl BufferManager<'a> {
         self.buffers.len()
     }
 
-    pub fn advance(&mut self, amount: usize) {
+    pub fn advance(&mut self, mut amount: usize) {
         while let Some((head, tail)) = self.buffers.split_first_mut() {
             // The head is smaller than the overall write, so pop it off the
             // the front of the buffers. Be sure to restore the original state,
@@ -99,18 +73,16 @@ impl BufferManager<'a> {
                     *head = saved;
                 }
 
-                *buffers = tail;
+                self.buffers = tail;
             }
             // The head is larger than the overall write, so it needs to be
             // modified in place (if any bytes were written at all)
             else {
-                if amount > 0 {
-                    // We're mutating the head. If we don't already have a saved
-                    // copy of the original, save it now.
-                    self.saved = Some(self.saved.unwrap_or(*head));
-                    *head = io::IoSlice::new(&head[amount..]);
+                if self.saved.is_none() {
+                    self.saved = Some(*head);
                 }
 
+                head.advance(amount);
                 return;
             }
         }

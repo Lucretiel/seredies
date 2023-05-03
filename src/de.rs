@@ -6,10 +6,8 @@ use std::fmt::Display;
 use serde::{de, forward_to_deserialize_any};
 use thiserror::Error;
 
-use parse::{ParseResult, Tag};
-use result::ResultAccess;
-
-use self::parse::Header;
+use self::parse::{ParseResult, TaggedHeader};
+use self::result::ResultAccess;
 
 /// Errors that can occur while deserializing RESP data
 #[derive(Debug, Clone, Error)]
@@ -70,13 +68,13 @@ fn apply_parser<'de, T>(
 /// abstracts over the presence or absence of a parsed header.
 pub trait ReadHeader<'de>: Sized {
     /// Read a header, possibly from the `input`.
-    fn read_header(self, input: &mut &'de [u8]) -> Result<Header<'de>, parse::Error>;
+    fn read_header(self, input: &mut &'de [u8]) -> Result<TaggedHeader<'de>, parse::Error>;
 }
 
-impl<'de> ReadHeader<'de> for Header<'de> {
-    /// A `Header` can simply return itself without touching the input
+impl<'de> ReadHeader<'de> for TaggedHeader<'de> {
+    /// A `TaggedHeader` can simply return itself without touching the input
     #[inline]
-    fn read_header(self, _input: &mut &'de [u8]) -> Result<Header<'de>, parse::Error> {
+    fn read_header(self, _input: &mut &'de [u8]) -> Result<TaggedHeader<'de>, parse::Error> {
         Ok(self)
     }
 }
@@ -86,7 +84,7 @@ pub struct ParseHeader;
 impl<'de> ReadHeader<'de> for ParseHeader {
     /// We don't have a header; we must try to read one from the input.
     #[inline]
-    fn read_header(self, input: &mut &'de [u8]) -> Result<Header<'de>, parse::Error> {
+    fn read_header(self, input: &mut &'de [u8]) -> Result<TaggedHeader<'de>, parse::Error> {
         apply_parser(input, parse::read_header)
     }
 }
@@ -97,7 +95,7 @@ pub struct BaseDeserializer<'a, 'de, H> {
 }
 
 pub type Deserializer<'a, 'de> = BaseDeserializer<'a, 'de, ParseHeader>;
-type PreParsedDeserializer<'a, 'de> = BaseDeserializer<'a, 'de, Header<'de>>;
+type PreParsedDeserializer<'a, 'de> = BaseDeserializer<'a, 'de, TaggedHeader<'de>>;
 
 impl<'a, 'de> Deserializer<'a, 'de> {
     #[inline]
@@ -111,7 +109,7 @@ impl<'a, 'de> Deserializer<'a, 'de> {
 
 impl<'a, 'de> PreParsedDeserializer<'a, 'de> {
     #[inline]
-    fn new(header: Header<'de>, input: &'a mut &'de [u8]) -> Self {
+    fn new(header: TaggedHeader<'de>, input: &'a mut &'de [u8]) -> Self {
         Self { input, header }
     }
 }
@@ -122,8 +120,7 @@ const MAX_BULK_LENGTH: i64 = 512 * 1024 * 1024;
 impl<'a, 'de, H: ReadHeader<'de>> BaseDeserializer<'a, 'de, H> {
     /// Read the header from a RESP value. The header consists of a single
     /// tag byte, followed by some kind of payload (which may not contain \r
-    /// or \n), followed by \r\n. The header might have already been read
-    /// from a previous parse, in which case it'll be available in self.header.
+    /// or \n), followed by \r\n.
     #[inline]
     fn read_header(self) -> Result<PreParsedDeserializer<'a, 'de>, parse::Error> {
         let input = self.input;
@@ -149,36 +146,30 @@ impl<'de, P: ReadHeader<'de>> de::Deserializer<'de> for BaseDeserializer<'_, 'de
     {
         let parsed = self.read_header()?;
 
-        match parsed.header.tag {
+        match parsed.header {
             // Simple Strings are handled as byte arrays
-            Tag::SimpleString => visitor.visit_borrowed_bytes(parsed.header.payload),
+            TaggedHeader::SimpleString(payload) => visitor.visit_borrowed_bytes(payload),
 
             // Errors are handled by default as actual deserialization errors.
             // (see deserialize_enum for how to circumvent this)
-            Tag::Error => Err(Error::Redis(parsed.header.payload.to_owned())),
+            TaggedHeader::Error(payload) => Err(Error::Redis(payload.to_owned())),
 
             // Integers are parsed then handled as i64. All Redis integers are
             // guaranteed to fit in a signed 64 bit int.
-            Tag::Integer => visitor.visit_i64(parse::parse_number(parsed.header.payload)?),
+            TaggedHeader::Integer(value) => visitor.visit_i64(value),
 
-            // Bulk strings are handled as byte arrays, just like Simple
-            // Strings. `$-1\r\n` is handled as a null.
-            Tag::BulkString => match parse::parse_number(parsed.header.payload)? {
-                -1 => visitor.visit_unit(),
-                length if length > MAX_BULK_LENGTH => Err(Error::Length),
-                length => visitor.visit_borrowed_bytes({
-                    let length = length.try_into().map_err(|_| Error::Length)?;
-                    apply_parser(parsed.input, |input| parse::read_exact(length, input))?
-                }),
-            },
+            // Bulk strings are handled as byte arrays
+            TaggedHeader::BulkString(len) if len > MAX_BULK_LENGTH => Err(Error::Length),
+            TaggedHeader::BulkString(len) => visitor.visit_borrowed_bytes({
+                let len = len.try_into().map_err(|_| Error::Length)?;
+                apply_parser(parsed.input, |input| parse::read_exact(len, input))?
+            }),
 
             // Arrays are handled as serde sequences.
-            Tag::Array => {
+            TaggedHeader::Array(length) => {
                 let mut seq = SeqAccess {
                     input: parsed.input,
-                    length: parse::parse_number(parsed.header.payload)?
-                        .try_into()
-                        .map_err(|_| Error::Length)?,
+                    length,
                 };
 
                 match visitor.visit_seq(&mut seq) {
@@ -202,6 +193,9 @@ impl<'de, P: ReadHeader<'de>> de::Deserializer<'de> for BaseDeserializer<'_, 'de
                     Err(err) => Err(err),
                 }
             }
+
+            // Null (technically a Bulk String with a length of -1) is a unit
+            TaggedHeader::Null => visitor.visit_unit(),
         }
     }
 
@@ -293,10 +287,8 @@ impl<'de, P: ReadHeader<'de>> de::Deserializer<'de> for BaseDeserializer<'_, 'de
     {
         let parsed = self.read_header()?;
 
-        match parsed.header.tag {
-            Tag::BulkString if parse::parse_number(parsed.header.payload)? == -1 => {
-                visitor.visit_none()
-            }
+        match parsed.header {
+            TaggedHeader::Null => visitor.visit_none(),
             _ => visitor.visit_some(parsed),
         }
     }
@@ -327,14 +319,18 @@ impl<'de, P: ReadHeader<'de>> de::Deserializer<'de> for BaseDeserializer<'_, 'de
             ("Result", ["Ok", "Err"] | ["Err", "Ok"]) => {
                 let parsed = self.read_header()?;
 
-                match (parsed.header.tag, parsed.header.payload) {
+                match parsed.header {
                     // "+OK\r\n" can be deserialized to either Result::Ok("OK") or
                     // Result::OK(())
-                    (Tag::SimpleString, b"OK") => visitor.visit_enum(ResultAccess::new_plain_ok()),
+                    TaggedHeader::SimpleString(b"OK") => {
+                        visitor.visit_enum(ResultAccess::new_plain_ok())
+                    }
 
                     // "-ERR message\r\n" can be deserialized into:
                     // Err("ERR message")
-                    (Tag::Error, message) => visitor.visit_enum(ResultAccess::new_err(message)),
+                    TaggedHeader::Error(message) => {
+                        visitor.visit_enum(ResultAccess::new_err(message))
+                    }
 
                     // For everything else, deserialize inline as a Result::Ok
                     _ => visitor.visit_enum(ResultAccess::new_ok(parsed)),
@@ -358,11 +354,12 @@ impl<'de> de::SeqAccess<'de> for SeqAccess<'_, 'de> {
     where
         T: de::DeserializeSeed<'de>,
     {
-        self.length
-            .checked_sub(1)
-            .map(|new_length| self.length = new_length)
-            .map(|()| seed.deserialize(Deserializer::new(self.input)))
-            .transpose()
+        self.length = match self.length.checked_sub(1) {
+            Some(length) => length,
+            None => return Ok(None),
+        };
+
+        seed.deserialize(Deserializer::new(self.input)).map(Some)
     }
 
     #[inline]
@@ -378,7 +375,6 @@ mod tests {
     use std::iter;
 
     use cool_asserts::assert_matches;
-    use itertools::Itertools as _;
     use serde::Deserialize as _;
 
     use super::*;
@@ -449,9 +445,16 @@ mod tests {
                 where
                     A: de::SeqAccess<'de>,
                 {
-                    iter::from_fn(move || seq.next_element().transpose())
-                        .try_collect()
-                        .map(Data::Array)
+                    let mut vec = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+
+                    itertools::process_results(
+                        iter::from_fn(|| seq.next_element().transpose()),
+                        |iter| {
+                            vec.extend(iter);
+                            vec
+                        },
+                    )
+                    .map(Data::Array)
                 }
 
                 fn visit_unit<E>(self) -> Result<Self::Value, E>
@@ -539,14 +542,11 @@ mod tests {
         assert_matches!(result, Error::Redis(message) => assert_eq!(message, b"ERROR bad data"));
     }
 
-    fn test_result_deserializer<'a, T, E>(
-        input: &'a (impl AsRef<[u8]> + ?Sized),
-        expected: Result<T, E>,
-    ) where
+    fn test_result_deserializer<'a, T, E>(mut input: &'a [u8], expected: Result<T, E>)
+    where
         T: de::Deserialize<'a> + Eq + Debug,
         E: de::Deserialize<'a> + Eq + Debug,
     {
-        let mut input = input.as_ref();
         let deserializer = Deserializer::new(&mut input);
         let result: Result<T, E> =
             Result::deserialize(deserializer).expect("Failed to deserialize");

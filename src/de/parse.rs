@@ -1,5 +1,3 @@
-use std::str;
-
 use memchr::memchr2;
 use thiserror::Error;
 
@@ -19,12 +17,13 @@ pub enum Error {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum Tag {
-    SimpleString,
-    Error,
-    Integer,
-    BulkString,
-    Array,
+pub enum TaggedHeader<'a> {
+    SimpleString(&'a [u8]),
+    Error(&'a [u8]),
+    Integer(i64),
+    BulkString(i64),
+    Array(i64),
+    Null,
 }
 
 pub type ParseResult<'a, O> = Result<(O, &'a [u8]), Error>;
@@ -39,30 +38,26 @@ pub fn read_endline(input: &[u8]) -> ParseResult<'_, ()> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Header<'de> {
-    pub tag: Tag,
-    pub payload: &'de [u8],
-}
-
 /// Read a tag and its payload, followed by an endline
-pub fn read_header(input: &[u8]) -> ParseResult<Header<'_>> {
+pub fn read_header(input: &[u8]) -> ParseResult<TaggedHeader<'_>> {
     let (&tag, input) = input.split_first().ok_or(Error::UnexpectedEof(3))?;
-
-    let tag = match tag {
-        b'+' => Tag::SimpleString,
-        b'-' => Tag::Error,
-        b':' => Tag::Integer,
-        b'$' => Tag::BulkString,
-        b'*' => Tag::Array,
-        tag => return Err(Error::BadTag(tag)),
+    let (payload, input) = {
+        let idx = memchr2(b'\r', b'\n', input).ok_or(Error::UnexpectedEof(2))?;
+        input.split_at(idx)
     };
-
-    let idx = memchr2(b'\r', b'\n', input).ok_or(Error::UnexpectedEof(2))?;
-    let (payload, input) = input.split_at(idx);
     let ((), input) = read_endline(input)?;
 
-    Ok((Header { tag, payload }, input))
+    match tag {
+        b'+' => Ok(TaggedHeader::SimpleString(payload)),
+        b'-' => Ok(TaggedHeader::Error(payload)),
+        b':' => parse_number(payload).map(TaggedHeader::Integer),
+        b'$' => parse_number(payload).map(|len| match len {
+            -1 => TaggedHeader::Null,
+            len => TaggedHeader::BulkString(len),
+        }),
+        b'*' => parse_number(payload).map(TaggedHeader::Array),
+        tag => Err(Error::BadTag(tag)),
+    }
 }
 
 #[inline]
@@ -73,20 +68,39 @@ fn try_split_at(input: &[u8], idx: usize) -> Option<(&[u8], &[u8])> {
 
 /// Read a chunk of a specific length, followed by endline
 pub fn read_exact(length: usize, input: &[u8]) -> ParseResult<'_, &[u8]> {
-    let (payload, input) = try_split_at(input, length).ok_or_else(|| {
-        // We know for sure that `length > input.len()` (because try_split_at
-        // would have succeeded otherwise), but we still need to check the +2
-        Error::UnexpectedEof((length - input.len()).saturating_add(2))
-    })?;
+    let (payload, input) = try_split_at(input, length)
+        .ok_or_else(|| Error::UnexpectedEof((length - input.len()).saturating_add(2)))?;
 
     let ((), input) = read_endline(input)?;
 
     Ok((payload, input))
 }
 
-pub fn parse_number(payload: &[u8]) -> Result<i64, Error> {
-    str::from_utf8(payload)
-        .map_err(|_| Error::Number)?
-        .parse()
-        .map_err(|_| Error::Number)
+#[inline]
+#[must_use]
+pub const fn ascii_to_digit(b: u8) -> Option<i64> {
+    match b {
+        b'0'..=b'9' => Some((b - b'0') as i64),
+        _ => None,
+    }
+}
+
+#[must_use]
+fn parse_number(payload: &[u8]) -> Result<i64, Error> {
+    let (payload, positive) = match payload.split_first().ok_or(Error::Number)? {
+        (&b'-', tail) => (tail, false),
+        (&b'+', tail) => (tail, true),
+        _ => (payload, true),
+    };
+
+    payload
+        .iter()
+        .copied()
+        .try_fold(0, move |accum, b| {
+            let digit = ascii_to_digit(b)?;
+            let digit = if positive { digit } else { -digit };
+            let accum = accum.checked_mul(10)?;
+            accum.checked_add(digit)
+        })
+        .ok_or(Error::Number)
 }

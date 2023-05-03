@@ -1,9 +1,14 @@
 mod primitives;
 
-use std::{convert::TryInto, io};
+use std::{
+    convert::TryInto,
+    io::{self, IoSlice},
+};
 
 use serde::{ser, Serializer as _};
 use thiserror::Error;
+
+use self::primitives::write_all_vectored;
 
 pub struct Serializer<'a, W> {
     writer: &'a mut W,
@@ -138,8 +143,8 @@ impl<'a, W: io::Write> ser::Serializer for Serializer<'a, W> {
     fn serialize_bytes(self, v: &[u8]) -> Result<Self::Ok, Self::Error> {
         let len: i64 = v.len().try_into().map_err(|_| Error::NumberOutOfRange)?;
         write!(self.writer, "${len}\r\n")?;
-        self.writer.write_all(v)?;
-        self.writer.write_all(b"\r\n").map_err(Error::Io)
+        write_all_vectored(self.writer, &mut [IoSlice::new(v), IoSlice::new(b"\r\n")])
+            .map_err(Error::Io)
     }
 
     fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
@@ -589,11 +594,11 @@ impl<W: io::Write> ser::Serializer for SerializeResultError<'_, W> {
         if v.iter().any(|&b| b == b'\r' || b == b'\n') {
             Err(Error::BadSimpleString)
         } else {
-            self.writer.write_all(b"-")?;
-            self.writer.write_all(v)?;
-            self.writer.write_all(b"\r\n")?;
-
-            Ok(())
+            write_all_vectored(
+                self.writer,
+                &mut [IoSlice::new(b"-"), IoSlice::new(v), IoSlice::new(b"\r\n")],
+            )
+            .map_err(Error::Io)
         }
     }
 
