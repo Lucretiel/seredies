@@ -58,6 +58,7 @@ pub fn read_header(input: &[u8]) -> ParseResult<TaggedHeader<'_>> {
         b'*' => parse_number(payload).map(TaggedHeader::Array),
         tag => Err(Error::BadTag(tag)),
     }
+    .map(|header| (header, input))
 }
 
 #[inline]
@@ -96,7 +97,7 @@ fn parse_number(payload: &[u8]) -> Result<i64, Error> {
     payload
         .iter()
         .copied()
-        .try_fold(0, move |accum, b| {
+        .try_fold(0i64, move |accum, b| {
             let digit = ascii_to_digit(b)?;
             let digit = if positive { digit } else { -digit };
             let accum = accum.checked_mul(10)?;

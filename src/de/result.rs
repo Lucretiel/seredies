@@ -1,8 +1,6 @@
 // Helpers for deserializing results from RESP values (and in particular
 // for handling `-ERR message\r\n` as an error)
 
-use std::marker::PhantomData;
-
 use serde::{de, forward_to_deserialize_any, Deserialize};
 
 use super::{Error, PreParsedDeserializer};
@@ -22,23 +20,19 @@ trait ResultAccessPattern<'de> {
         T: de::DeserializeSeed<'de>;
 }
 
-pub struct ResultAccess<T, E> {
+pub struct ResultAccess<T> {
     access: T,
-    error: PhantomData<E>,
 }
 
-impl<T, E> ResultAccess<T, E> {
+impl<T> ResultAccess<T> {
     #[inline]
     #[must_use]
     fn new(access: T) -> Self {
-        Self {
-            access,
-            error: PhantomData,
-        }
+        Self { access }
     }
 }
 
-impl<E> ResultAccess<ResultPlainOkPattern, E> {
+impl ResultAccess<ResultPlainOkPattern> {
     #[inline]
     #[must_use]
     pub fn new_plain_ok() -> Self {
@@ -46,7 +40,7 @@ impl<E> ResultAccess<ResultPlainOkPattern, E> {
     }
 }
 
-impl<'a, 'de, E> ResultAccess<ResultOkPattern<'a, 'de>, E> {
+impl<'a, 'de> ResultAccess<ResultOkPattern<'a, 'de>> {
     #[inline]
     #[must_use]
     pub fn new_ok(deserializer: PreParsedDeserializer<'a, 'de>) -> Self {
@@ -54,7 +48,7 @@ impl<'a, 'de, E> ResultAccess<ResultOkPattern<'a, 'de>, E> {
     }
 }
 
-impl<'de, E> ResultAccess<ResultErrPattern<'de>, E> {
+impl<'de> ResultAccess<ResultErrPattern<'de>> {
     #[inline]
     #[must_use]
     pub fn new_err(message: &'de [u8]) -> Self {
@@ -62,8 +56,8 @@ impl<'de, E> ResultAccess<ResultErrPattern<'de>, E> {
     }
 }
 
-impl<'de, T: ResultAccessPattern<'de>, E: de::Error> de::EnumAccess<'de> for ResultAccess<T, E> {
-    type Error = E;
+impl<'de, T: ResultAccessPattern<'de>> de::EnumAccess<'de> for ResultAccess<T> {
+    type Error = Error;
     type Variant = Self;
 
     #[inline]
@@ -79,8 +73,8 @@ impl<'de, T: ResultAccessPattern<'de>, E: de::Error> de::EnumAccess<'de> for Res
     }
 }
 
-impl<'de, T: ResultAccessPattern<'de>, E: de::Error> de::VariantAccess<'de> for ResultAccess<T, E> {
-    type Error = E;
+impl<'de, T: ResultAccessPattern<'de>> de::VariantAccess<'de> for ResultAccess<T> {
+    type Error = Error;
 
     #[inline]
     fn newtype_variant_seed<S>(self, seed: S) -> Result<S::Value, Self::Error>

@@ -63,9 +63,6 @@ impl<'a> BufferManager<'a> {
 
     pub fn advance(&mut self, mut amount: usize) {
         while let Some((head, tail)) = self.buffers.split_first_mut() {
-            // The head is smaller than the overall write, so pop it off the
-            // the front of the buffers. Be sure to restore the original state,
-            // if necessary.
             if head.len() <= amount {
                 amount -= head.len();
 
@@ -82,7 +79,8 @@ impl<'a> BufferManager<'a> {
                     self.saved = Some(*head);
                 }
 
-                head.advance(amount);
+                *head = io::IoSlice::new(&head.ge[amount..]);
+
                 return;
             }
         }

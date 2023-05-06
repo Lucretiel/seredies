@@ -166,10 +166,10 @@ impl<'de, P: ReadHeader<'de>> de::Deserializer<'de> for BaseDeserializer<'_, 'de
             }),
 
             // Arrays are handled as serde sequences.
-            TaggedHeader::Array(length) => {
+            TaggedHeader::Array(len) => {
                 let mut seq = SeqAccess {
                     input: parsed.input,
-                    length,
+                    length: len.try_into().map_err(|_| Error::Length)?,
                 };
 
                 match visitor.visit_seq(&mut seq) {
@@ -504,6 +504,7 @@ mod tests {
         weird_null: "$-001\r\n" => Null;
         array: "*2\r\n$5\r\nhello\r\n$5\r\nworld\r\n" => ["hello", "world"];
         heterogeneous: b"*3\r\n:10\r\n$5\r\nhello\r\n$-1\r\n" => [Data::Integer(10), Data::String(b"hello"), Null];
+        nested_array: "*3\r\n*2\r\n+hello\r\n+world\r\n*2\r\n+goodbye\r\n+night\r\n*2\r\n$3\r\nabc\r\n$3\r\ndef\r\n" => [["hello", "world"], ["goodbye", "night"], ["abc", "def"]];
     }
 
     #[test]
