@@ -312,7 +312,7 @@ where
     forward_to_deserialize_any! {
         bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
         bytes byte_buf unit_struct seq tuple unit option enum
-        tuple_struct identifier
+        tuple_struct identifier ignored_any
     }
 
     fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -358,13 +358,6 @@ where
             KeyValuePairsAdapter(visitor),
         )
     }
-
-    fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
-    where
-        V: de::Visitor<'de>,
-    {
-        self.0.deserialize_ignored_any(visitor)
-    }
 }
 
 impl<'de, V> de::Visitor<'de> for KeyValuePairsAdapter<V>
@@ -374,7 +367,7 @@ where
     type Value = V::Value;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(formatter, "an array of key-value pairs, containing ")?;
+        write!(formatter, "an flattened array of key-value pairs")?;
         self.0.expecting(formatter)
     }
 
