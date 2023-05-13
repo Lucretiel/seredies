@@ -1,3 +1,11 @@
 {
-  "cSpell.words": ["bufs", "HGETALL", "seredies"]
+  "cSpell.words": [
+    "bufs",
+    "EXAT",
+    "HGETALL",
+    "HMSET",
+    "KEEPTTL",
+    "PXAT",
+    "seredies"
+  ]
 }
