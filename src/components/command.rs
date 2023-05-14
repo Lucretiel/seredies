@@ -222,17 +222,14 @@ where
             .0
             .serialize(CommandSerializer {
                 serializer: length::Serializer,
-                length: None,
+                length: (),
             })
             .map_err(|err| match err {
                 length::Error::Custom(msg) => ser::Error::custom(msg),
                 err => ser::Error::custom(err),
             })?;
 
-        self.0.serialize(CommandSerializer {
-            serializer,
-            length: Some(length),
-        })
+        self.0.serialize(CommandSerializer { serializer, length })
     }
 }
 
@@ -242,14 +239,36 @@ fn invalid_command_type<T, E: ser::Error>(kind: &str) -> Result<T, E> {
     )))
 }
 
-struct CommandSerializer<S> {
-    serializer: S,
-    length: Option<usize>,
+trait MaybeLength: Copy {
+    #[must_use]
+    fn get(self) -> Option<usize>;
 }
 
-impl<S> ser::Serializer for CommandSerializer<S>
+impl MaybeLength for () {
+    #[inline(always)]
+    #[must_use]
+    fn get(self) -> Option<usize> {
+        None
+    }
+}
+
+impl MaybeLength for usize {
+    #[inline(always)]
+    #[must_use]
+    fn get(self) -> Option<usize> {
+        Some(self)
+    }
+}
+
+struct CommandSerializer<S, L> {
+    serializer: S,
+    length: L,
+}
+
+impl<S, L> ser::Serializer for CommandSerializer<S, L>
 where
     S: ser::Serializer,
+    L: MaybeLength,
 {
     type Ok = S::Ok;
     type Error = S::Error;
@@ -426,7 +445,7 @@ where
     ) -> Result<Self::SerializeTupleStruct, Self::Error> {
         use ser::SerializeSeq as _;
 
-        let mut sequence = self.serializer.serialize_seq(self.length)?;
+        let mut sequence = self.serializer.serialize_seq(self.length.get())?;
         sequence.serialize_element(RedisString::new_ref(name))?;
         Ok(TupleSeqAdapter::new(CommandSequencer { sequence }))
     }
@@ -455,7 +474,7 @@ where
     ) -> Result<Self::SerializeStruct, Self::Error> {
         use ser::SerializeSeq as _;
 
-        let mut sequence = self.serializer.serialize_seq(self.length)?;
+        let mut sequence = self.serializer.serialize_seq(self.length.get())?;
         sequence.serialize_element(RedisString::new_ref(name))?;
         Ok(CommandSequencer { sequence })
     }
