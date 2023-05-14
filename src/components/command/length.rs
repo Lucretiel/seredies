@@ -1,4 +1,4 @@
-use serde::ser;
+use serde::{ser, Serialize};
 use thiserror::Error;
 
 use crate::ser::util::TupleSeqAdapter;
@@ -194,6 +194,18 @@ impl ser::Serializer for Serializer {
     #[inline]
     fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
         Ok(Accumulator::new())
+    }
+
+    fn collect_seq<I>(self, iter: I) -> Result<Self::Ok, Self::Error>
+    where
+        I: IntoIterator,
+        <I as IntoIterator>::Item: serde::Serialize,
+    {
+        iter.into_iter()
+            .map(|item| item.serialize(Serializer))
+            .try_fold(0usize, |accum, len| {
+                accum.checked_add(len?).ok_or(Error::Overflow)
+            })
     }
 
     #[inline]

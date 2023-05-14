@@ -10,6 +10,16 @@ use thiserror::Error;
 
 use self::util::TupleSeqAdapter;
 
+pub fn to_vec<T>(data: &T) -> Result<Vec<u8>, Error>
+where
+    T: ser::Serialize + ?Sized,
+{
+    let mut buffer = Vec::new();
+    let serializer = Serializer::new(&mut buffer);
+    data.serialize(serializer)?;
+    Ok(buffer)
+}
+
 pub struct Serializer<'a, W> {
     writer: &'a mut W,
 }
@@ -22,35 +32,71 @@ impl<'a, W: io::Write> Serializer<'a, W> {
     }
 }
 
+/// Errors that can occur during serialization
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
+    /// Complex enums can't be serialized (only unit enums are supported)
     #[error("can't serialize enums (other than unit variants)")]
     UnsupportedEnumType,
 
+    /// Map types can't be serialized (consider using
+    /// [`KeyValuePairs`][crate::components::KeyValuePairs] to flatten them,
+    /// or [`Command`][crate::components::Command] if you're trying to
+    /// construct a redis command containing a map)
     #[error("can't serialize maps")]
     UnsupportedMapType,
 
+    /// Float types can't be serialized. Consider using
+    /// [`RedisString`][crate::components::RedisString] to convert them to a
+    /// Redis string, if that's appropriate for your use case.
     #[error("can't serialize floats")]
     UnsupportedFloatType,
 
+    /// Attempted to serialize a number that was outside the range of a signed
+    /// 64 bit integer. Redis integers always fit in this range.
+    ///
+    /// Don't forget that Redis commands are always a list of strings, even
+    /// when they contain numeric data. Consider using
+    /// [`RedisString`][crate::components::RedisString] or
+    /// [`Command`][crate::components::Command] in this case.
     #[error("can't serialize numbers outside the range of a signed 64 bit integer")]
     NumberOutOfRange,
 
+    /// Redis arrays are length-prefixed; they must know the length ahead of
+    /// time. Consider using [`Command`][crate::components::Command] if you're
+    /// trying to serialize a Redis command, as it automatically handles
+    /// efficiently computing the length of the array (without allocating).
     #[error("can't serialize sequences of unknown length")]
     UnknownSeqLength,
 
+    /// Attempted to serialize too many or too few sequence elements. This
+    /// error occurs when the number of serialized array elements differed
+    /// from the prefix-reported length of the array.
     #[error("attempted to serialize too many or too few sequence elements")]
     BadSeqLength,
 
+    /// Attempted to serialize a RESP [Simple String] or [Error] that contained
+    /// a `\r` or `\n`.
+    ///
+    /// [Simple String]: https://redis.io/docs/reference/protocol-spec/#resp-simple-strings
+    /// [Error]: https://redis.io/docs/reference/protocol-spec/#resp-errors
     #[error("attempted to serialize a Simple String that contained a \\r or \\n")]
     BadSimpleString,
 
+    /// There was an i/o error during serialization.
     #[error("i/o error during serialization")]
     Io(#[from] io::Error),
 
+    /// The data being serialized encountered some kind of error, separate from
+    /// the RESP protocol.
     #[error("error from Serialize type: {0}")]
     Custom(String),
 
+    /// Attempted to serialize something other than a string, bytes, or
+    /// unit enum as a RESP [Error].
+    ///
+    /// [Error]: https://redis.io/docs/reference/protocol-spec/#resp-errors
     #[error("invalid payload for a Result::Err. Must be a string or simple enum")]
     InvalidErrorPayload,
 }

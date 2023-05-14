@@ -1,6 +1,6 @@
 use serde::ser;
 
-/// Utility type intended to reduce serde serializer boilerplate
+/// Utility type intended to reduce serde serializer boilerplate.
 ///
 /// Many of the trait serialization traits are functionally identical. This
 /// type wraps some inner type and forwards the trait implementations

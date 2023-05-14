@@ -24,8 +24,6 @@ Note that this type *cannot* distinguish a `[u8]` from other kinds of
 slices; be sure to use a container like [`serde_bytes::Bytes`] to ensure
 that these slices are serialized as bytes objects rather than sequences.
 
-In the future this will also support deserializing.
-
 # Example
 
 ```

@@ -1,3 +1,7 @@
+/*!
+Helper components implementing common Redis and Rust patterns.
+ */
+
 mod command;
 mod key_value;
 mod string;

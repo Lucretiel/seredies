@@ -47,16 +47,16 @@ use serde_test::{assert_ser_tokens, Token};
 
 /// The SET command. It includes a key and a value, as well as some optional
 /// behavior flags. Notice the use of `serde(rename)` to match the redis flag
-/// names, and `into="Command"` to wrap it in a command for serializing.
+/// names.
 #[derive(Serialize)]
 #[serde(rename = "SET")]
 struct Set<T> {
     // The key to set
     key: String,
 
-    // The value to set. `Command` can correctly handle most primitive types,
-    // including strings and ints
-    value: T,
+    // The value to set. We use a RedisString to ensure that no matter what
+    // type we use, it'll be correctly sent as a Redis string
+    value: RedisString<T>,
 
     // An optional enum will be serialized using just the variant name itself.
     skip: Option<Skip>,
@@ -100,7 +100,7 @@ enum Expiry {
 
 let command = Command(Set{
     key: "my-key".to_owned(),
-    value: 36,
+    value: RedisString(36),
 
     skip: None,
     expiry: None,
@@ -120,7 +120,7 @@ assert_ser_tokens(&command, &[
 // A more complex example
 let command = Command(Set{
     key: "my-key".to_owned(),
-    value: 36,
+    value: RedisString(36),
 
     skip: Some(Skip::IfExists),
     expiry: Some(Expiry::Seconds(60)),

@@ -1,3 +1,139 @@
+/*!
+Serde deserializer for turning Redis RESP data into Rust data structures.
+
+This module contains a faithful implementation of the
+[Redis Serialization Protocol](https://redis.io/docs/reference/protocol-spec/).
+
+# Basic example
+
+```
+use serde::Deserialize;
+use seredies::de::from_bytes;
+
+let data = b"\
+    *4\r\n\
+    +OK\r\n\
+    :24\r\n\
+    $8\r\nBorrowed\r\n\
+    *3\r\n\
+        $-1\r\n\
+        +Hello,\r\n\
+        +World!\r\n\
+";
+
+#[derive(Deserialize, PartialEq, Eq, Debug)]
+struct Data<'a>(
+    String,
+    i32,
+    &'a str,
+    Vec<Option<String>>,
+);
+
+let data: Data = from_bytes(data).expect("failed to deserialize");
+
+assert_eq!(
+    data,
+    Data(
+        "OK".to_owned(),
+        24,
+        "Borrowed",
+        Vec::from([
+            None,
+            Some("Hello,".to_owned()),
+            Some("World!".to_owned()),
+        ]),
+    ),
+);
+```
+
+# Faithful
+
+`seredies` is a mostly faithful serde implementation of RESP. This means that
+it (mostly) doesn't try to go above and beyond what the RESP data model can
+express, which is mostly strings, integers, and arrays. In particular it's not
+capable of deserializing structs, maps, or complex enums. Instead, `seredies`
+provides a collection of [components][crate::components], which implement
+translate common patterns into Redis's minimal data model. This ensures that
+developers should never be surprised by the deserializer trying to do
+something unexpectedly "clever", but can opt-in to more streamlined behavior.
+
+## Supported types:
+
+- `bool` (treated as an integer 1 or 0)
+- All integers
+- Sequences, tuples, and tuple structs
+- Bytes and string types
+    - Technically we don't support strings separately, but by default most
+      string types will deserialize themselves from `bytes` data.
+    - See the [RedisString][crate::components::RedisString] component for a
+      wrapper type that converts any primitive value to or from a Redis string.
+    - RESP is totally binary safe, so it's easy to deserialize &str and other
+      borrowed data from the payload.
+- Result (see below).
+- Option: similar to JSON, an option is handled as either a null or as an
+  untagged value.
+
+## Unsupported types:
+
+- Floats.
+    - Consider [RedisString][crate::components::RedisString] for the common
+      case that Redis is treating your float data as a string.
+- Maps, structs, complex enums.
+    - Consider [KeyValuePairs][crate::components::KeyValuePairs] for the common
+      case that your key-value data is being treated by Redis as a flattened
+      array of key-value pairs.
+
+# Errors and Results
+
+RESP includes an [error type], which is delivered in the response when
+something has gone wrong. By default, this error type is treated as a
+deserialize error, and appears as the [`Error::Redis`] variant when encountered.
+However, you can instead handle them directly by deserializing a [`Result`]
+directly; in this case, the `Ok` variant will contain the deserialized data,
+and a successfully deserialized `Err` variant will contain a redis error.
+
+Additionally, seredies ubiquitously uses the simple string "OK" to signal an
+uninteresting success. This pattern is so common that `seredies` supports
+deserializing it directly to an `Ok(())` [`Result`] value.
+
+## Error example
+
+```
+use seredies::de::{from_bytes, Error};
+
+let error = b"-ERR unknown command \"helloworld\"\r\n";
+
+// Normally, Redis errors appear as deserialize errors (in the same way that
+// a parse error would appear):
+let res: Result<Vec<i32>, Error> = from_bytes(error);
+assert!(res.is_err());
+
+// However, you can instead Deserialize the Result directly:
+let data: Result<Vec<i32>, String> = from_bytes(error).expect("deserialize shouldn't fail");
+assert_eq!(data, Err("ERR unknown command \"helloworld\"".to_owned()));
+```
+
+## `Result::Ok` example
+
+```
+use seredies::de::from_bytes;
+
+type BoringResult<'a> = Result<(), &'a str>;
+
+let result: BoringResult = from_bytes(b"+OK\r\n")
+    .expect("deserialize shouldn't fail");
+
+assert_eq!(result, Ok(()));
+
+let result: BoringResult = from_bytes(b"-ERR error message\r\n")
+    .expect("deserialize shouldn't fail");
+
+assert_eq!(result, Err("ERR error message"));
+```
+
+[error type]: https://redis.io/docs/reference/protocol-spec/#resp-errors
+*/
+
 pub mod parse;
 mod result;
 
@@ -9,6 +145,21 @@ use thiserror::Error;
 
 use self::parse::{ParseResult, TaggedHeader};
 use self::result::ResultAccess;
+
+/// Deserialize a `T` object from a string containing RESP data.
+pub fn from_str<'a, T: de::Deserialize<'a>>(input: &'a str) -> Result<T, Error> {
+    from_bytes(input.as_bytes())
+}
+
+/// Deserialize a `T` object from a byte slice containing RESP data.
+pub fn from_bytes<'a, T>(mut input: &'a [u8]) -> Result<T, Error>
+where
+    T: de::Deserialize<'a>,
+{
+    let deserializer = Deserializer::new(&mut input);
+    let value = T::deserialize(deserializer)?;
+    input.is_empty().then_some(value).ok_or(Error::TrailingData)
+}
 
 /// Errors that can occur while deserializing RESP data.
 #[derive(Debug, Clone, Error)]
@@ -22,6 +173,13 @@ pub enum Error {
     /// have been negative, or exceeded the 512MB limit for bulk strings.
     #[error("an array or bulk string length was out of bounds")]
     Length,
+
+    /// There was leftover data in the input after the deserialize operation.
+    /// This is only returned by [`from_str`] and similar functions; the
+    /// [`Deserializer`] itself will normally just leave that data untouched,
+    /// to facilitate response pipelining.
+    #[error("the deserialize completed, but didn't consume the entire input")]
+    TrailingData,
 
     /// The `Deserialize` type successfully deserialized from a Redis array,
     /// but didn't consume the whole thing.
@@ -61,6 +219,20 @@ fn apply_parser<'de, T>(
     })
 }
 
+/// A RESP Deserializer.
+///
+/// This is the core serde [`Deserializer`][de::Deserializer] for RESP data.
+/// it operates on `&mut &[u8]`, a mutable reference to a byte slice, and
+/// after a successful deserialize it updates the slice in place the reflect
+/// any remaining unparsed content. This is intended to facilitate response
+/// pipelining, where a single stream might include many responses.
+///
+/// A single `Deserializer` can be used to deserialize at most one RESP value.
+/// They are trivially cheap to create, though, so a new `Deserializer` can
+/// be used for each additional value.
+///
+/// See also `from_bytes` and `from_str` for more convenient deserialize
+/// behavior.
 #[derive(Debug)]
 pub struct Deserializer<'a, 'de> {
     inner: UnparsedDeserializer<'a, 'de>,
