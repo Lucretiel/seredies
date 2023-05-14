@@ -18,15 +18,22 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// The data wasn't malformed, but it ended before the parse could complete.
+    /// The value in the error is the minimum number of additional bytes
+    /// required for a successful parse.
     #[error("unexpected end of input; read at least {0} more bytes and try again")]
     UnexpectedEof(usize),
 
+    /// A newline was expected and was malformed somehow. It might have been
+    /// entirely missing, or was only a `\n`.
     #[error("malformed newline during parsing (all redis newlines are \\r\\n")]
     MalformedNewline,
 
+    /// A header tag byte wasn't one of the recognized RESP tag bytes.
     #[error("unrecognized tag byte {0:#x}")]
     BadTag(u8),
 
+    /// A decimal number failed to parse.
     #[error("failed to parse a decimal integer")]
     Number,
 }
@@ -44,7 +51,7 @@ pub enum Error {
 #[derive(Debug, Clone, Copy)]
 pub enum TaggedHeader<'a> {
     /// A RESP [Simple String](https://redis.io/docs/reference/protocol-spec/#resp-simple-strings).
-    /// These are often used to communicate trivial response information
+    /// These are often used to communicate trivial response information.
     SimpleString(&'a [u8]),
 
     /// A RESP [Error](https://redis.io/docs/reference/protocol-spec/#resp-errors).
@@ -89,7 +96,21 @@ fn read_endline(input: &[u8]) -> ParseResult<'_, ()> {
     }
 }
 
-/// Read a tag and its payload, followed by an `\r\n`
+/**
+Read a tag and its payload, followed by an `\r\n`.
+
+# Example
+
+```
+use seredies::de::parse::{read_header, TaggedHeader};
+use cool_asserts::assert_matches;
+
+assert_matches!(
+    read_header(b"+OK\r\nabc"),
+    Ok((TaggedHeader::SimpleString(b"OK"), b"abc"))
+);
+```
+*/
 pub fn read_header(input: &[u8]) -> ParseResult<'_, TaggedHeader<'_>> {
     let (&tag, input) = input.split_first().ok_or(Error::UnexpectedEof(3))?;
     let (payload, input) = {
@@ -121,7 +142,21 @@ fn try_split_at(input: &[u8], idx: usize) -> Option<(&[u8], &[u8])> {
     Some((head, tail))
 }
 
-/// Read precisely `length` bytes, followed by `\r\n`
+/**
+Read precisely `length` bytes, followed by `\r\n`.
+
+# Example
+
+```
+use seredies::de::parse::{read_exact, TaggedHeader};
+use cool_asserts::assert_matches;
+
+assert_matches!(
+    read_exact(4, b"ABCD\r\n123"),
+    Ok((b"ABCD", b"123"))
+);
+```
+*/
 pub fn read_exact(length: usize, input: &[u8]) -> ParseResult<'_, &[u8]> {
     let (payload, input) = try_split_at(input, length)
         .ok_or_else(|| Error::UnexpectedEof((length - input.len()).saturating_add(2)))?;
