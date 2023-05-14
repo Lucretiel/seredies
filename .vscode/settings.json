@@ -6,6 +6,7 @@
     "HMSET",
     "KEEPTTL",
     "PXAT",
-    "seredies"
+    "seredies",
+    "zkey"
   ]
 }

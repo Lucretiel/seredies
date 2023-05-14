@@ -8,29 +8,207 @@ use crate::ser::util::TupleSeqAdapter;
 
 use super::RedisString;
 
-/// Adapter type for serializing redis commands
-///
-/// Redis commands are always delivered as a list of strings, regardless of
-/// the structure of the underlying command. This adapter type makes it easier
-/// to implement commands by serializing the underlying type as though it was
-/// a redis command. It uses the following rules & conventions:
-///
-/// - The type should be a struct or enum. The name of the struct or name of
-///   the enum will be used as the command name. Tuples, lists, and maps cannot
-///   be commands.
-/// - The fields in the type will be serialized as arguments, using these rules:
-///   - Fields will be serialized in order, and the field names will be ignored.
-///   - Primitive types like strings and numbers will be serialized as strings.
-///   - Booleans are treated like flags, and will serialize the name of the
-///     field if true.
-///   - Options are treated like arguments, and will serialize the name of the
-///     field and the value in the option if Some
-///   - Enums will serialize the name of the enum, followed by its value (if
-///     present)
-///   - Lists will be flattened one level. Nested lists are an error.
-///   - Maps will be flattened to key-value sequences. Nested maps are an error.
+/**
+Adapter type for serializing redis commands
+
+Redis commands are always delivered as a list of strings, regardless of
+the structure of the underlying command. This adapter type makes it easier
+to implement commands by serializing the underlying type as though it was
+a redis command. It uses the following rules & conventions:
+
+- The type should be a struct or enum. The name of the struct or name of
+  the enum will be used as the command name. Tuples, lists, and maps cannot
+  be commands.
+- The fields in the type will be serialized as arguments, using these rules:
+  - Fields will be serialized in order, and the field names will be ignored.
+  - Primitive types like strings and numbers will be serialized as strings.
+  - Booleans are treated like flags, and will serialize the name of the
+    field if true.
+  - Options are treated like arguments. If the value is a primitive type,
+    like a string or int, it will be serialized in a pair with its field
+    name (if present); if it's a struct or enum type, the struct name or
+    variant name will be used as the argument (see examples).
+  - Enums will serialize the name of the enum, followed by its value (if
+    present)
+  - Lists will be flattened one level. Nested lists are an error.
+  - Maps will be flattened to key-value sequences. Nested maps are an error.
+
+# Examples
+
+## `SET`
+
+This example shows the Redis [`SET` command](https://redis.io/commands/set/).
+
+```
+use seredies::components::{RedisString, Command};
+
+use serde::Serialize;
+use serde_test::{assert_ser_tokens, Token};
+
+/// The SET command. It includes a key and a value, as well as some optional
+/// behavior flags. Notice the use of `serde(rename)` to match the redis flag
+/// names, and `into="Command"` to wrap it in a command for serializing.
+#[derive(Serialize)]
+#[serde(rename = "SET")]
+struct Set<T> {
+    // The key to set
+    key: String,
+
+    // The value to set. `Command` can correctly handle most primitive types,
+    // including strings and ints
+    value: T,
+
+    // An optional enum will be serialized using just the variant name itself.
+    skip: Option<Skip>,
+
+    // If true, a bool field is serialized as the field name itself
+    #[serde(rename="GET")]
+    get: bool,
+
+    // An enum with a value will be serialized as a key-value pair, if present
+    expiry: Option<Expiry>,
+}
+
+/// The `skip` parameter determines if the `SET` should be skipped
+#[derive(Serialize)]
+enum Skip {
+    #[serde(rename="NX")]
+    IfExists,
+
+    #[serde(rename="XX")]
+    IfAbsent,
+}
+
+/// The `expiry` parameter sets a time-to-live on the setting
+#[derive(Serialize)]
+enum Expiry {
+    #[serde(rename = "EX")]
+    Seconds(u64),
+
+    #[serde(rename = "PX")]
+    Millis(u64),
+
+    #[serde(rename = "EXAT")]
+    Timestamp(u64),
+
+    #[serde(rename = "PXAT")]
+    TimestampMillis(u64),
+
+    #[serde(rename = "KEEPTTL")]
+    Keep,
+}
+
+let command = Command(Set{
+    key: "my-key".to_owned(),
+    value: 36,
+
+    skip: None,
+    expiry: None,
+    get: false,
+});
+
+// This will be serialized as a list of byte arrays, and can therefore be sent
+// to the seredies RESP serializer
+assert_ser_tokens(&command, &[
+    Token::Seq { len: Some(3) },
+    Token::Bytes(b"SET"),
+    Token::Bytes(b"my-key"),
+    Token::Bytes(b"36"),
+    Token::SeqEnd,
+]);
+
+// A more complex example
+let command = Command(Set{
+    key: "my-key".to_owned(),
+    value: 36,
+
+    skip: Some(Skip::IfExists),
+    expiry: Some(Expiry::Seconds(60)),
+    get: true,
+});
+
+assert_ser_tokens(&command, &[
+    Token::Seq{len: Some(7)},
+    Token::Bytes(b"SET"),
+    Token::Bytes(b"my-key"),
+    Token::Bytes(b"36"),
+    Token::Bytes(b"NX"),
+    Token::Bytes(b"GET"),
+    Token::Bytes(b"EX"),
+    Token::Bytes(b"60"),
+    Token::SeqEnd,
+]);
+
+```
+
+## `SCAN`
+
+This example shows the Redis [`SCAN` command](https://redis.io/commands/scan/).
+In particular it shows the behavior of optional primitive types and how they
+differ from optional enums.
+
+```
+use serde::Serialize;
+use seredies::components::Command;
+use serde_test::{assert_ser_tokens, Token};
+
+#[derive(Serialize, Default)]
+#[serde(rename="SCAN")]
+struct Scan {
+    cursor: u64,
+
+    #[serde(rename="MATCH")]
+    pattern: Option<String>,
+
+    #[serde(rename="COUNT")]
+    count: Option<u32>,
+
+    #[serde(rename="TYPE")]
+    kind: Option<String>,
+}
+
+let command = Command(Scan{
+    cursor: 0,
+    ..Default::default()
+});
+
+assert_ser_tokens(&command, &[
+    Token::Seq { len: Some(2) },
+    Token::Bytes(b"SCAN"),
+    Token::Bytes(b"0"),
+    Token::SeqEnd
+]);
+
+let command = Command(Scan{
+    cursor: 10,
+    count: Some(100),
+    kind: Some("zkey".to_string()),
+    pattern: None,
+});
+
+assert_ser_tokens(&command, &[
+    Token::Seq { len: Some(6) },
+    Token::Bytes(b"SCAN"),
+    Token::Bytes(b"10"),
+    Token::Bytes(b"COUNT"),
+    Token::Bytes(b"100"),
+    Token::Bytes(b"TYPE"),
+    Token::Bytes(b"zkey"),
+    Token::SeqEnd
+]);
+```
+*/
 #[derive(Debug, Copy, Clone, Default)]
 pub struct Command<T>(pub T);
+
+impl<T> From<T> for Command<T>
+where
+    T: ser::Serialize,
+{
+    fn from(cmd: T) -> Self {
+        Self(cmd)
+    }
+}
 
 impl<T> ser::Serialize for Command<T>
 where
