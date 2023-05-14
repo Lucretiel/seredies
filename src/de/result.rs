@@ -1,15 +1,25 @@
 // Helpers for deserializing results from RESP values (and in particular
 // for handling `-ERR message\r\n` as an error)
 
-use serde::{de, forward_to_deserialize_any, Deserialize};
+use serde::{de, forward_to_deserialize_any};
 
 use super::{Error, PreParsedDeserializer};
 
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(variant_identifier)]
+#[derive(Debug, Clone, Copy)]
 enum ResultVariant {
     Ok,
     Err,
+}
+
+impl ResultVariant {
+    #[inline]
+    #[must_use]
+    const fn get(self) -> &'static str {
+        match self {
+            ResultVariant::Ok => "Ok",
+            ResultVariant::Err => "Err",
+        }
+    }
 }
 
 trait ResultAccessPattern<'de> {
@@ -65,11 +75,8 @@ impl<'de, T: ResultAccessPattern<'de>> de::EnumAccess<'de> for ResultAccess<T> {
     where
         V: de::DeserializeSeed<'de>,
     {
-        seed.deserialize(de::value::BorrowedStrDeserializer::new(match T::VARIANT {
-            ResultVariant::Ok => "Ok",
-            ResultVariant::Err => "Err",
-        }))
-        .map(|value| (value, self))
+        seed.deserialize(de::value::BorrowedStrDeserializer::new(T::VARIANT.get()))
+            .map(|value| (value, self))
     }
 }
 

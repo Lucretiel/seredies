@@ -18,14 +18,12 @@ arrayvec = "0.7.2"
 lazy_format = "2.0.0"
 memchr = "2.5.0"
 paste = { version = "1.0.12", default-features = false }
-serde = { version = "1.0.118", default-features = false, features = [
-    "derive",
-    "std",
-] }
+serde = { version = "1.0.118", default-features = false, features = ["std"] }
 serde_bytes = { version = "0.11.9", default-features = false }
 thiserror = "1.0.32"
 
 [dev-dependencies]
+serde = { version = "1.0.118", features = ["derive"], default-features = false }
 cool_asserts = "2.0.3"
 serde_test = "1.0.163"
 itertools = "0.10.3"
