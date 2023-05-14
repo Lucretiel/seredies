@@ -3,15 +3,56 @@ use std::{fmt::Display, io::Write as _, mem};
 use arrayvec::ArrayVec;
 use serde::ser;
 
-/// Adapter type that serializes the contained value as a string.
-///
-/// Frequently, especially when sending commands, Redis will require data to be
-/// passed as a string, even when the underlying data is something like an
-/// integer. This type serializes its inner value as a string, and works
-/// on most primitive types.
+/**
+Adapter type that serializes the contained value as a string.
+
+Frequently, especially when sending commands, Redis will require data to be
+passed as a string, even when the underlying data is something like an
+integer. This type serializes its inner value as a string, and works
+on most primitive types. This will serialize unit enum variants and unit
+structs as their name.
+
+Note that this type *cannot* distinguish a `[u8]` from other kinds of
+slices; be sure to use a container like [`serde_bytes::Bytes`] to ensure
+that these slices are serialized as bytes objects rather than sequences.
+
+In the future this will also support deserializing.
+
+# Example
+
+```
+use seredies::components::RedisString;
+use serde::Serialize;
+use serde_test::{assert_ser_tokens, Token};
+
+assert_ser_tokens(&RedisString("Hello"), &[Token::Bytes(b"Hello")]);
+assert_ser_tokens(&RedisString(5i32), &[Token::Bytes(b"5")]);
+assert_ser_tokens(&RedisString(4.5), &[Token::Bytes(b"4.5")]);
+
+let s: &RedisString<str> = RedisString::new_ref("string");
+assert_ser_tokens(s, &[Token::Bytes(b"string")]);
+
+#[derive(Serialize)]
+struct UnitStruct;
+
+#[derive(Serialize)]
+enum Data {
+    Foo,
+    Bar
+}
+
+assert_ser_tokens(&RedisString(UnitStruct), &[Token::Bytes(b"UnitStruct")]);
+assert_ser_tokens(&RedisString(Data::Bar), &[Token::Bytes(b"Bar")]);
+```
+*/
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(transparent)]
 pub struct RedisString<T: ?Sized>(pub T);
 
 impl<T: ?Sized> RedisString<T> {
+    /// Convert a reference to some underlying type into a reference to a
+    /// `RedisString` containing that object. This works even on unsized values
+    /// and allows for the creation of things like `&RedisString<str>`.
     pub fn new_ref(value: &T) -> &Self {
         unsafe { mem::transmute(value) }
     }
@@ -33,7 +74,7 @@ impl<S> RedisStringAdapter<S>
 where
     S: ser::Serializer,
 {
-    fn serialize_int(self, value: impl Display) -> Result<S::Ok, S::Error> {
+    fn serialize_number(self, value: impl Display) -> Result<S::Ok, S::Error> {
         // 39 digits should be enough for even a 128 bit int, but we'll round
         // way up to be safe
         let mut buffer: ArrayVec<u8, 64> = ArrayVec::new();
@@ -69,62 +110,62 @@ where
 
     #[inline]
     fn serialize_i8(self, v: i8) -> Result<Self::Ok, Self::Error> {
-        self.serialize_int(v)
+        self.serialize_number(v)
     }
 
     #[inline]
     fn serialize_i16(self, v: i16) -> Result<Self::Ok, Self::Error> {
-        self.serialize_int(v)
+        self.serialize_number(v)
     }
 
     #[inline]
     fn serialize_i32(self, v: i32) -> Result<Self::Ok, Self::Error> {
-        self.serialize_int(v)
+        self.serialize_number(v)
     }
 
     #[inline]
     fn serialize_i64(self, v: i64) -> Result<Self::Ok, Self::Error> {
-        self.serialize_int(v)
+        self.serialize_number(v)
     }
 
     #[inline]
     fn serialize_i128(self, v: i128) -> Result<Self::Ok, Self::Error> {
-        self.serialize_int(v)
+        self.serialize_number(v)
     }
 
     #[inline]
     fn serialize_u8(self, v: u8) -> Result<Self::Ok, Self::Error> {
-        self.serialize_int(v)
+        self.serialize_number(v)
     }
 
     #[inline]
     fn serialize_u16(self, v: u16) -> Result<Self::Ok, Self::Error> {
-        self.serialize_int(v)
+        self.serialize_number(v)
     }
 
     #[inline]
     fn serialize_u32(self, v: u32) -> Result<Self::Ok, Self::Error> {
-        self.serialize_int(v)
+        self.serialize_number(v)
     }
 
     #[inline]
     fn serialize_u64(self, v: u64) -> Result<Self::Ok, Self::Error> {
-        self.serialize_int(v)
+        self.serialize_number(v)
     }
 
     #[inline]
     fn serialize_u128(self, v: u128) -> Result<Self::Ok, Self::Error> {
-        self.serialize_int(v)
+        self.serialize_number(v)
     }
 
     #[inline]
     fn serialize_f32(self, v: f32) -> Result<Self::Ok, Self::Error> {
-        self.serialize_int(v)
+        self.serialize_number(v)
     }
 
     #[inline]
     fn serialize_f64(self, v: f64) -> Result<Self::Ok, Self::Error> {
-        self.serialize_int(v)
+        self.serialize_number(v)
     }
 
     #[inline]
