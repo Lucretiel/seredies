@@ -20,7 +20,7 @@ trait ResultAccessPattern<'de> {
         T: de::DeserializeSeed<'de>;
 }
 
-pub struct ResultAccess<T> {
+pub(super) struct ResultAccess<T> {
     access: T,
 }
 

@@ -1,19 +1,20 @@
-mod parse;
+pub mod parse;
 mod result;
 
 use std::fmt::Display;
 
+use paste::paste;
 use serde::{de, forward_to_deserialize_any};
 use thiserror::Error;
 
 use self::parse::{ParseResult, TaggedHeader};
 use self::result::ResultAccess;
 
-/// Errors that can occur while deserializing RESP data
+/// Errors that can occur while deserializing RESP data.
 #[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// There was an error during parsing (such as a \r without a \n)
+    /// There was an error during parsing (such as a \r without a \n).
     #[error("parsing error")]
     Parse(#[from] parse::Error),
 
@@ -60,13 +61,74 @@ fn apply_parser<'de, T>(
     })
 }
 
+#[derive(Debug)]
+pub struct Deserializer<'a, 'de> {
+    inner: UnparsedDeserializer<'a, 'de>,
+}
+
+impl<'a, 'de> Deserializer<'a, 'de> {
+    /// Create a new RESP deserializer.
+    ///
+    /// The input should contain at least one complete RESP object (which
+    /// might contain additional sub-objects). The input will be mutated during
+    /// deserialization, such that after an object is fully deserialized, the
+    /// buffer will be at the unused tail of the input.
+    #[inline]
+    #[must_use]
+    pub fn new(input: &'a mut &'de [u8]) -> Self {
+        Self {
+            inner: UnparsedDeserializer::new(input),
+        }
+    }
+}
+
+macro_rules! forward {
+    ($($method:ident $(($($arg:ident : $type:ty),*))?)*) => {$(
+        paste! {
+            #[inline]
+            fn [<deserialize_ $method>]<V>(
+                self,
+                $($($arg : $type,)*)?
+                visitor: V,
+            ) -> Result<V::Value, Self::Error>
+            where
+                V: de::Visitor<'de>
+            {
+                self.inner.[<deserialize_ $method>]($($($arg,)*)? visitor)
+            }
+        }
+    )*}
+}
+
+impl<'a, 'de> de::Deserializer<'de> for Deserializer<'a, 'de> {
+    type Error = Error;
+
+    forward! {
+        any ignored_any bool
+        i8 i16 i32 i64 i128
+        u8 u16 u32 u64 u128
+        f32 f64
+        char str string bytes byte_buf identifier
+        option unit
+        seq map
+
+        unit_struct(name: &'static str)
+        newtype_struct(name: &'static str)
+        tuple(len: usize)
+        tuple_struct(name: &'static str, len: usize)
+        struct(name: &'static str, fields: &'static[&'static str])
+        enum(name: &'static str, variants: &'static[&'static str])
+
+    }
+}
+
 /// Trait that abstracts the header read operation. At various points during
 /// a deserialize, the Deserializer might either need to parse a header, or
 /// might already have one from a parse operation. For example, when
 /// deserializing an `Option`, if the value is NOT null, the parsed header
 /// is retained by the deserializer passed into `deserialize_some`. This trait
 /// abstracts over the presence or absence of a parsed header.
-pub trait ReadHeader<'de>: Sized {
+trait ReadHeader<'de>: Sized {
     /// Read a header, possibly from the `input`.
     fn read_header(self, input: &mut &'de [u8]) -> Result<TaggedHeader<'de>, parse::Error>;
 }
@@ -79,7 +141,8 @@ impl<'de> ReadHeader<'de> for TaggedHeader<'de> {
     }
 }
 
-pub struct ParseHeader;
+#[derive(Debug)]
+struct ParseHeader;
 
 impl<'de> ReadHeader<'de> for ParseHeader {
     /// We don't have a header; we must try to read one from the input.
@@ -89,15 +152,16 @@ impl<'de> ReadHeader<'de> for ParseHeader {
     }
 }
 
-pub struct BaseDeserializer<'a, 'de, H> {
+#[derive(Debug)]
+struct BaseDeserializer<'a, 'de, H> {
     header: H,
     input: &'a mut &'de [u8],
 }
 
-pub type Deserializer<'a, 'de> = BaseDeserializer<'a, 'de, ParseHeader>;
+type UnparsedDeserializer<'a, 'de> = BaseDeserializer<'a, 'de, ParseHeader>;
 type PreParsedDeserializer<'a, 'de> = BaseDeserializer<'a, 'de, TaggedHeader<'de>>;
 
-impl<'a, 'de> Deserializer<'a, 'de> {
+impl<'a, 'de> UnparsedDeserializer<'a, 'de> {
     #[inline]
     pub fn new(input: &'a mut &'de [u8]) -> Self {
         Self {

@@ -4,14 +4,23 @@ use serde::ser;
 ///
 /// Many of the trait serialization traits are functionally identical. This
 /// type wraps some inner type and forwards the trait implementations
-/// accordingly (for instance, from [`ser::SerializeSeq`] to
-/// [`ser::SerializeTuple`])
+/// accordingly. It forwards the following traits:
+///
+/// - From [`ser::SerializeSeq`]:
+///   - [`ser::SerializeTuple`]
+///   - [`ser::SerializeTupleStruct`]
+///   - [`ser::SerializeTupleVariant`]
+/// - From [`ser::SerializeStruct`]:
+///   - [`ser::SerializeStructVariant`]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TupleSeqAdapter<T> {
+    /// The wrapped serializer type. This should implement
+    /// [`ser::SerializeSeq`] or [`ser::SerializeStruct`] (or both)
     pub inner: T,
 }
 
 impl<T> TupleSeqAdapter<T> {
+    /// Create a new `TupleSeqAdapter`
     #[inline]
     #[must_use]
     pub fn new(inner: T) -> Self {
