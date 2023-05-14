@@ -175,7 +175,6 @@ const fn ascii_to_digit(b: u8) -> Option<i64> {
     }
 }
 
-#[must_use]
 fn parse_number(payload: &[u8]) -> Result<i64, Error> {
     let (payload, positive) = match payload.split_first().ok_or(Error::Number)? {
         (&b'-', tail) => (tail, false),
