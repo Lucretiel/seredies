@@ -4,6 +4,7 @@ pub mod util;
 
 use std::io;
 
+use memchr::memchr2;
 use serde::ser;
 use thiserror::Error;
 
@@ -55,6 +56,7 @@ pub enum Error {
 }
 
 impl ser::Error for Error {
+    #[inline]
     fn custom<T>(msg: T) -> Self
     where
         T: std::fmt::Display,
@@ -63,6 +65,7 @@ impl ser::Error for Error {
     }
 }
 
+#[inline]
 fn serialize_number(dest: &mut impl io::Write, value: impl TryInto<i64>) -> Result<(), Error> {
     let value = value.try_into().map_err(|_| Error::NumberOutOfRange)?;
     write!(dest, ":{value}\r\n",).map_err(Error::Io)
@@ -298,6 +301,8 @@ pub struct SerializeSeq<'a, W> {
 }
 
 impl<'a, W: io::Write> SerializeSeq<'a, W> {
+    #[inline]
+    #[must_use]
     pub fn new(writer: &'a mut W, length: usize) -> Self {
         Self {
             writer,
@@ -310,6 +315,7 @@ impl<W: io::Write> ser::SerializeSeq for SerializeSeq<'_, W> {
     type Ok = ();
     type Error = Error;
 
+    #[inline]
     fn serialize_element<T: ?Sized>(&mut self, value: &T) -> Result<(), Self::Error>
     where
         T: serde::Serialize,
@@ -324,6 +330,7 @@ impl<W: io::Write> ser::SerializeSeq for SerializeSeq<'_, W> {
         })
     }
 
+    #[inline]
     fn end(self) -> Result<Self::Ok, Self::Error> {
         match self.remaining {
             0 => Ok(()),
@@ -353,74 +360,92 @@ impl<'a, W: io::Write> ser::Serializer for SerializeResultOk<'a, W> {
     type SerializeStructVariant = ser::Impossible<(), Error>;
     type SerializeTupleVariant = ser::Impossible<(), Error>;
 
+    #[inline]
     fn serialize_bool(self, v: bool) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_bool(v)
     }
 
+    #[inline]
     fn serialize_i8(self, v: i8) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_i8(v)
     }
 
+    #[inline]
     fn serialize_i16(self, v: i16) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_i16(v)
     }
 
+    #[inline]
     fn serialize_i32(self, v: i32) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_i32(v)
     }
 
+    #[inline]
     fn serialize_i64(self, v: i64) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_i64(v)
     }
 
+    #[inline]
     fn serialize_i128(self, v: i128) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_i128(v)
     }
 
+    #[inline]
     fn serialize_u8(self, v: u8) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_u8(v)
     }
 
+    #[inline]
     fn serialize_u16(self, v: u16) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_u16(v)
     }
 
+    #[inline]
     fn serialize_u32(self, v: u32) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_u32(v)
     }
 
+    #[inline]
     fn serialize_u64(self, v: u64) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_u64(v)
     }
 
+    #[inline]
     fn serialize_u128(self, v: u128) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_u128(v)
     }
 
+    #[inline]
     fn serialize_f32(self, v: f32) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_f32(v)
     }
 
+    #[inline]
     fn serialize_f64(self, v: f64) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_f64(v)
     }
 
+    #[inline]
     fn serialize_char(self, v: char) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_char(v)
     }
 
+    #[inline]
     fn serialize_str(self, v: &str) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_str(v)
     }
 
+    #[inline]
     fn serialize_bytes(self, v: &[u8]) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_bytes(v)
     }
 
+    #[inline]
     fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_none()
     }
 
+    #[inline]
     fn serialize_some<T: ?Sized>(self, value: &T) -> Result<Self::Ok, Self::Error>
     where
         T: serde::Serialize,
@@ -428,14 +453,17 @@ impl<'a, W: io::Write> ser::Serializer for SerializeResultOk<'a, W> {
         self.inner.serialize_some(value)
     }
 
+    #[inline]
     fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
         self.inner.writer.write_all(b"+OK\r\n").map_err(Error::Io)
     }
 
+    #[inline]
     fn serialize_unit_struct(self, name: &'static str) -> Result<Self::Ok, Self::Error> {
         self.inner.serialize_unit_struct(name)
     }
 
+    #[inline]
     fn serialize_unit_variant(
         self,
         name: &'static str,
@@ -446,6 +474,7 @@ impl<'a, W: io::Write> ser::Serializer for SerializeResultOk<'a, W> {
             .serialize_unit_variant(name, variant_index, variant)
     }
 
+    #[inline]
     fn serialize_newtype_struct<T: ?Sized>(
         self,
         name: &'static str,
@@ -457,6 +486,7 @@ impl<'a, W: io::Write> ser::Serializer for SerializeResultOk<'a, W> {
         self.inner.serialize_newtype_struct(name, value)
     }
 
+    #[inline]
     fn serialize_newtype_variant<T: ?Sized>(
         self,
         name: &'static str,
@@ -471,14 +501,17 @@ impl<'a, W: io::Write> ser::Serializer for SerializeResultOk<'a, W> {
             .serialize_newtype_variant(name, variant_index, variant, value)
     }
 
+    #[inline]
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
         self.inner.serialize_seq(len)
     }
 
+    #[inline]
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
         self.inner.serialize_tuple(len)
     }
 
+    #[inline]
     fn serialize_tuple_struct(
         self,
         name: &'static str,
@@ -487,6 +520,7 @@ impl<'a, W: io::Write> ser::Serializer for SerializeResultOk<'a, W> {
         self.inner.serialize_tuple_struct(name, len)
     }
 
+    #[inline]
     fn serialize_tuple_variant(
         self,
         name: &'static str,
@@ -498,10 +532,12 @@ impl<'a, W: io::Write> ser::Serializer for SerializeResultOk<'a, W> {
             .serialize_tuple_variant(name, variant_index, variant, len)
     }
 
+    #[inline]
     fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
         self.inner.serialize_map(len)
     }
 
+    #[inline]
     fn serialize_struct(
         self,
         name: &'static str,
@@ -510,6 +546,7 @@ impl<'a, W: io::Write> ser::Serializer for SerializeResultOk<'a, W> {
         self.inner.serialize_struct(name, len)
     }
 
+    #[inline]
     fn serialize_struct_variant(
         self,
         name: &'static str,
@@ -540,69 +577,84 @@ impl<W: io::Write> ser::Serializer for SerializeResultError<'_, W> {
     type SerializeStruct = ser::Impossible<(), Error>;
     type SerializeStructVariant = ser::Impossible<(), Error>;
 
+    #[inline]
     fn serialize_bool(self, _v: bool) -> Result<Self::Ok, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_i8(self, _v: i8) -> Result<Self::Ok, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_i16(self, _v: i16) -> Result<Self::Ok, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_i32(self, _v: i32) -> Result<Self::Ok, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_i64(self, _v: i64) -> Result<Self::Ok, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_i128(self, _v: i128) -> Result<Self::Ok, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_u8(self, _v: u8) -> Result<Self::Ok, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_u16(self, _v: u16) -> Result<Self::Ok, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_u32(self, _v: u32) -> Result<Self::Ok, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_u64(self, _v: u64) -> Result<Self::Ok, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_u128(self, _v: u128) -> Result<Self::Ok, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_f32(self, _v: f32) -> Result<Self::Ok, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_f64(self, _v: f64) -> Result<Self::Ok, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_char(self, v: char) -> Result<Self::Ok, Self::Error> {
         let mut buf = [0; 4];
         self.serialize_str(v.encode_utf8(&mut buf))
     }
 
+    #[inline]
     fn serialize_str(self, v: &str) -> Result<Self::Ok, Self::Error> {
         self.serialize_bytes(v.as_bytes())
     }
 
     fn serialize_bytes(self, v: &[u8]) -> Result<Self::Ok, Self::Error> {
-        if v.iter().any(|&b| b == b'\r' || b == b'\n') {
+        if memchr2(b'\r', b'\n', v).is_some() {
             Err(Error::BadSimpleString)
         } else {
             self.writer.write_all(b"-")?;
@@ -612,10 +664,12 @@ impl<W: io::Write> ser::Serializer for SerializeResultError<'_, W> {
         }
     }
 
+    #[inline]
     fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_some<T: ?Sized>(self, _v: &T) -> Result<Self::Ok, Self::Error>
     where
         T: serde::Serialize,
@@ -623,14 +677,17 @@ impl<W: io::Write> ser::Serializer for SerializeResultError<'_, W> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_unit_struct(self, name: &'static str) -> Result<Self::Ok, Self::Error> {
         self.serialize_str(name)
     }
 
+    #[inline]
     fn serialize_unit_variant(
         self,
         _name: &'static str,
@@ -640,6 +697,7 @@ impl<W: io::Write> ser::Serializer for SerializeResultError<'_, W> {
         self.serialize_str(variant)
     }
 
+    #[inline]
     fn serialize_newtype_struct<T: ?Sized>(
         self,
         _name: &'static str,
@@ -651,6 +709,7 @@ impl<W: io::Write> ser::Serializer for SerializeResultError<'_, W> {
         value.serialize(self)
     }
 
+    #[inline]
     fn serialize_newtype_variant<T: ?Sized>(
         self,
         _name: &'static str,
@@ -664,14 +723,17 @@ impl<W: io::Write> ser::Serializer for SerializeResultError<'_, W> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_tuple_struct(
         self,
         _name: &'static str,
@@ -680,6 +742,7 @@ impl<W: io::Write> ser::Serializer for SerializeResultError<'_, W> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_tuple_variant(
         self,
         _name: &'static str,
@@ -690,10 +753,12 @@ impl<W: io::Write> ser::Serializer for SerializeResultError<'_, W> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_struct(
         self,
         _name: &'static str,
@@ -702,6 +767,7 @@ impl<W: io::Write> ser::Serializer for SerializeResultError<'_, W> {
         Err(Error::InvalidErrorPayload)
     }
 
+    #[inline]
     fn serialize_struct_variant(
         self,
         _name: &'static str,
