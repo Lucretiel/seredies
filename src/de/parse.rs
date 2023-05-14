@@ -112,6 +112,13 @@ assert_matches!(
 ```
 */
 pub fn read_header(input: &[u8]) -> ParseResult<'_, TaggedHeader<'_>> {
+    // Fast path for these common cases
+    match try_split_at(input, 5) {
+        Some((b"+OK\r\n", tail)) => return Ok((TaggedHeader::SimpleString(b"OK"), tail)),
+        Some((b"$-1\r\n", tail)) => return Ok((TaggedHeader::Null, tail)),
+        _ => {}
+    };
+
     let (&tag, input) = input.split_first().ok_or(Error::UnexpectedEof(3))?;
     let (payload, input) = {
         let idx = memchr2(b'\r', b'\n', input).ok_or(Error::UnexpectedEof(2))?;
