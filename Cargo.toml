@@ -1,6 +1,6 @@
 [package]
 name = "seredies"
-version = "0.0.1"
+version = "1.0.0"
 authors = ["Nathan West <Lucretiel@gmail.com>"]
 edition = "2021"
 
