@@ -340,44 +340,70 @@ impl Output for String {
     }
 }
 
+/// [`Output`] adapter type for serializing to an [`io::Write`] object, such as a file
+/// or pipeline.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IoWrite<T>(pub T);
+
+impl<T: io::Write> Output for IoWrite<T> {
+    #[inline]
+    fn reserve(&mut self, _count: usize) {}
+
+    #[inline]
+    fn write_str(&mut self, s: &str) -> Result<(), Error> {
+        self.write_bytes(s.as_bytes())
+    }
+
+    #[inline]
+    fn write_bytes(&mut self, b: &[u8]) -> Result<(), Error> {
+        self.0.write_all(b).map_err(Error::Io)
+    }
+
+    #[inline]
+    fn write_fmt(&mut self, fmt: fmt::Arguments<'_>) -> Result<(), Error> {
+        self.0.write_fmt(fmt).map_err(Error::Io)
+    }
+}
+
 /// A RESP Serializer.
 ///
 /// This is the core serde [`Serializer`][ser::Serializer] for RESP data.
-/// it operates on any `&mut impl io::Write` type; this covers things like
-/// files and pipelines, as well as [`Vec<u8>` and other byte buffer types.
+/// It writes encoded RESP data to any object implementing [`Output`]. This
+/// includes [`Vec<u8>`] and [`String`], as well as [`io::Write`] objects
+/// (via [`IoWrite`])
 ///
 /// A single `Serializer` can be used to serialize at most one RESP value. They
 /// are trivially cheap to create, though, so a new `Serializer` can be used
 /// for each additional value.
-pub struct Serializer<'a, W> {
-    inner: BaseSerializer<'a, W, NullUnit>,
+pub struct Serializer<'a, O> {
+    inner: BaseSerializer<'a, O, NullUnit>,
 }
 
-impl<'a, W> Serializer<'a, W>
+impl<'a, O> Serializer<'a, O>
 where
-    W: Output,
+    O: Output,
 {
     /// Create a new RESP serializer that will write the serialized data to
     /// the given writer.
     #[inline]
     #[must_use]
-    pub fn new(writer: &'a mut W) -> Self {
+    pub fn new(writer: &'a mut O) -> Self {
         Self {
             inner: BaseSerializer::new(writer),
         }
     }
 }
 
-impl<'a, W> ser::Serializer for Serializer<'a, W>
+impl<'a, O> ser::Serializer for Serializer<'a, O>
 where
-    W: Output,
+    O: Output,
 {
     type Ok = ();
     type Error = Error;
 
-    type SerializeSeq = SerializeSeq<'a, W>;
-    type SerializeTuple = TupleSeqAdapter<SerializeSeq<'a, W>>;
-    type SerializeTupleStruct = TupleSeqAdapter<SerializeSeq<'a, W>>;
+    type SerializeSeq = SerializeSeq<'a, O>;
+    type SerializeTuple = TupleSeqAdapter<SerializeSeq<'a, O>>;
+    type SerializeTupleStruct = TupleSeqAdapter<SerializeSeq<'a, O>>;
 
     type SerializeMap = ser::Impossible<(), Error>;
     type SerializeStruct = ser::Impossible<(), Error>;
@@ -456,18 +482,18 @@ where
     }
 }
 
-struct BaseSerializer<'a, W, U> {
-    output: &'a mut W,
+struct BaseSerializer<'a, O, U> {
+    output: &'a mut O,
     unit: U,
 }
 
-impl<'a, W> BaseSerializer<'a, W, NullUnit>
+impl<'a, O> BaseSerializer<'a, O, NullUnit>
 where
-    W: Output,
+    O: Output,
 {
     #[inline]
     #[must_use]
-    pub fn new(writer: &'a mut W) -> Self {
+    pub fn new(writer: &'a mut O) -> Self {
         Self {
             output: writer,
             unit: NullUnit,
@@ -475,13 +501,13 @@ where
     }
 }
 
-impl<'a, W> BaseSerializer<'a, W, ResultOkUnit>
+impl<'a, O> BaseSerializer<'a, O, ResultOkUnit>
 where
-    W: Output,
+    O: Output,
 {
     #[inline]
     #[must_use]
-    pub fn new_ok(writer: &'a mut W) -> Self {
+    pub fn new_ok(writer: &'a mut O) -> Self {
         Self {
             output: writer,
             unit: ResultOkUnit,
@@ -489,59 +515,50 @@ where
     }
 }
 
-/// Errors that can occur during serialization
+/// Errors that can occur during serialization.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// Complex enums can't be serialized (only unit enums are supported)
-    #[error("can't serialize enums (other than unit variants)")]
-    UnsupportedEnumType,
-
-    /// Map types can't be serialized (consider using
-    /// [`KeyValuePairs`][crate::components::KeyValuePairs] to flatten them,
-    /// or [`Command`][crate::components::Command] if you're trying to
-    /// construct a redis command containing a map)
-    #[error("can't serialize maps")]
-    UnsupportedMapType,
-
-    /// Float types can't be serialized. Consider using
-    /// [`RedisString`][crate::components::RedisString] to convert them to a
-    /// Redis string, if that's appropriate for your use case.
-    #[error("can't serialize floats")]
-    UnsupportedFloatType,
+    /// Certain types can't be serialized. The argument contains the kind of
+    /// type that failed to serialize.
+    #[error("can't serialize {0}")]
+    UnsupportedType(&'static str),
 
     /// Attempted to serialize a number that was outside the range of a signed
     /// 64 bit integer. Redis integers always fit in this range.
     ///
-    /// Don't forget that Redis commands are always a list of strings, even
-    /// when they contain numeric data. Consider using
+    /// Don't forget that Redis commands are always a list of strings, even when
+    /// they contain numeric data. Consider using
     /// [`RedisString`][crate::components::RedisString] or
     /// [`Command`][crate::components::Command] in this case.
     #[error("can't serialize numbers outside the range of a signed 64 bit integer")]
     NumberOutOfRange,
 
     /// Redis arrays are length-prefixed; they must know the length ahead of
-    /// time. Consider using [`Command`][crate::components::Command] if you're
+    /// time. This error occurs when a sequence is serialized without a known
+    /// length. Consider using [`Command`][crate::components::Command] if you're
     /// trying to serialize a Redis command, as it automatically handles
     /// efficiently computing the length of the array (without allocating).
     #[error("can't serialize sequences of unknown length")]
     UnknownSeqLength,
 
-    /// Attempted to serialize too many or too few sequence elements. This
-    /// error occurs when the number of serialized array elements differed
-    /// from the prefix-reported length of the array.
+    /// Attempted to serialize too many or too few sequence elements. This error
+    /// occurs when the number of serialized array elements differed from the
+    /// prefix-reported length of the array.
     #[error("attempted to serialize too many or too few sequence elements")]
     BadSeqLength,
 
     /// Attempted to serialize a RESP [Simple String] or [Error] that contained
     /// a `\r` or `\n`.
     ///
-    /// [Simple String]: https://redis.io/docs/reference/protocol-spec/#resp-simple-strings
+    /// [Simple String]:
+    ///     https://redis.io/docs/reference/protocol-spec/#resp-simple-strings
     /// [Error]: https://redis.io/docs/reference/protocol-spec/#resp-errors
     #[error("attempted to serialize a Simple String that contained a \\r or \\n")]
     BadSimpleString,
 
-    /// There was an i/o error during serialization.
+    /// There was an i/o error during serialization. Generally this can only
+    /// happen when serializing to a "real" i/o device, like a file.
     #[error("i/o error during serialization")]
     Io(#[from] io::Error),
 
@@ -550,8 +567,8 @@ pub enum Error {
     #[error("error from Serialize type: {0}")]
     Custom(String),
 
-    /// Attempted to serialize something other than a string, bytes, or
-    /// unit enum as a RESP [Error].
+    /// Attempted to serialize something other than a string, bytes, or unit
+    /// enum as a RESP [Error].
     ///
     /// [Error]: https://redis.io/docs/reference/protocol-spec/#resp-errors
     #[error("invalid payload for a Result::Err. Must be a string or simple enum")]
@@ -574,7 +591,6 @@ impl ser::Error for Error {
     }
 }
 
-#[inline]
 fn serialize_number(dest: &mut impl Output, value: impl TryInto<i64>) -> Result<(), Error> {
     let value = value.try_into().map_err(|_| Error::NumberOutOfRange)?;
     dest.reserve(4);
@@ -590,11 +606,8 @@ fn serialize_bulk_string(
         .try_into()
         .map_err(|_| Error::NumberOutOfRange)?;
 
-    // God only knows what'll happen to you if this checked_add fails
-    if let Some(reserved) = value.len().checked_add(6) {
-        dest.reserve(reserved)
-    }
-
+    // God only knows what'll happen to you if this saturates
+    dest.reserve(value.len().saturating_add(6));
     write!(dest, "${len}\r\n")?;
     value.write_to_output(dest)?;
     dest.write_str("\r\n")
@@ -602,10 +615,7 @@ fn serialize_bulk_string(
 
 fn serialize_error(dest: &mut impl Output, value: &(impl Writable + ?Sized)) -> Result<(), Error> {
     if value.safe() {
-        if let Some(reserved) = value.len().checked_add(3) {
-            dest.reserve(reserved)
-        }
-
+        dest.reserve(value.len().saturating_add(3));
         dest.write_str("-")?;
         value.write_to_output(dest)?;
         dest.write_str("\r\n")
@@ -614,17 +624,17 @@ fn serialize_error(dest: &mut impl Output, value: &(impl Writable + ?Sized)) -> 
     }
 }
 
-impl<'a, W, U> ser::Serializer for BaseSerializer<'a, W, U>
+impl<'a, O, U> ser::Serializer for BaseSerializer<'a, O, U>
 where
-    W: Output,
+    O: Output,
     U: UnitBehavior,
 {
     type Ok = ();
     type Error = Error;
 
-    type SerializeSeq = SerializeSeq<'a, W>;
-    type SerializeTuple = TupleSeqAdapter<SerializeSeq<'a, W>>;
-    type SerializeTupleStruct = TupleSeqAdapter<SerializeSeq<'a, W>>;
+    type SerializeSeq = SerializeSeq<'a, O>;
+    type SerializeTuple = TupleSeqAdapter<SerializeSeq<'a, O>>;
+    type SerializeTupleStruct = TupleSeqAdapter<SerializeSeq<'a, O>>;
 
     type SerializeMap = ser::Impossible<(), Error>;
     type SerializeStruct = ser::Impossible<(), Error>;
@@ -689,12 +699,12 @@ where
 
     #[inline]
     fn serialize_f32(self, _v: f32) -> Result<Self::Ok, Self::Error> {
-        Err(Error::UnsupportedFloatType)
+        Err(Error::UnsupportedType("f32"))
     }
 
     #[inline]
     fn serialize_f64(self, _v: f64) -> Result<Self::Ok, Self::Error> {
-        Err(Error::UnsupportedFloatType)
+        Err(Error::UnsupportedType("f64"))
     }
 
     #[inline]
@@ -790,7 +800,7 @@ where
         match (name, variant) {
             ("Result", "Ok") => value.serialize(BaseSerializer::new_ok(self.output)),
             ("Result", "Err") => value.serialize(SerializeResultError::new(self.output)),
-            _ => Err(Error::UnsupportedEnumType),
+            _ => Err(Error::UnsupportedType("data enum")),
         }
     }
 
@@ -823,12 +833,12 @@ where
         _variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleVariant, Self::Error> {
-        Err(Error::UnsupportedEnumType)
+        Err(Error::UnsupportedType("data enum"))
     }
 
     #[inline]
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
-        Err(Error::UnsupportedMapType)
+        Err(Error::UnsupportedType("map"))
     }
 
     #[inline]
@@ -837,7 +847,7 @@ where
         _name: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStruct, Self::Error> {
-        Err(Error::UnsupportedMapType)
+        Err(Error::UnsupportedType("struct"))
     }
 
     #[inline]
@@ -848,25 +858,25 @@ where
         _variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStructVariant, Self::Error> {
-        Err(Error::UnsupportedEnumType)
+        Err(Error::UnsupportedType("enum"))
     }
 }
 
 /// The RESP sequence serializer. This is used by the [`Serializer`] to create
 /// RESP arrays. You should rarely need to interact with this type directly.
 #[derive(Debug)]
-pub struct SerializeSeq<'a, W> {
+pub struct SerializeSeq<'a, O> {
     remaining: usize,
-    output: &'a mut W,
+    output: &'a mut O,
 }
 
-impl<'a, W> SerializeSeq<'a, W>
+impl<'a, O> SerializeSeq<'a, O>
 where
-    W: Output,
+    O: Output,
 {
     #[inline]
     #[must_use]
-    fn new(output: &'a mut W, length: usize) -> Self {
+    fn new(output: &'a mut O, length: usize) -> Self {
         Self {
             output,
             remaining: length,
@@ -874,9 +884,9 @@ where
     }
 }
 
-impl<W> ser::SerializeSeq for SerializeSeq<'_, W>
+impl<O> ser::SerializeSeq for SerializeSeq<'_, O>
 where
-    W: Output,
+    O: Output,
 {
     type Ok = ();
     type Error = Error;
@@ -905,22 +915,22 @@ where
 
 /// An error serializer only accepts strings / bytes or similar payloads and
 /// serializes them as Redis error values.
-struct SerializeResultError<'a, W> {
-    output: &'a mut W,
+struct SerializeResultError<'a, O> {
+    output: &'a mut O,
 }
 
-impl<'a, W> SerializeResultError<'a, W>
+impl<'a, O> SerializeResultError<'a, O>
 where
-    W: Output,
+    O: Output,
 {
-    pub fn new(output: &'a mut W) -> Self {
+    pub fn new(output: &'a mut O) -> Self {
         Self { output }
     }
 }
 
-impl<W> ser::Serializer for SerializeResultError<'_, W>
+impl<O> ser::Serializer for SerializeResultError<'_, O>
 where
-    W: Output,
+    O: Output,
 {
     type Ok = ();
     type Error = Error;

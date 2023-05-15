@@ -9,16 +9,18 @@ use crate::ser::util::TupleSeqAdapter;
 use super::RedisString;
 
 /**
-Adapter type for serializing redis commands
+Adapter type for serializing redis commands.
 
-Redis commands are always delivered as a list of string or byteses, regardless
-of the structure of the underlying command. This adapter type makes it easier
-to implement commands by serializing the underlying type as though it was
-a redis command. It uses the following rules & conventions:
+Redis commands are always delivered as a list of strings, regardless of the
+structure of the underlying command. This adapter type makes it easier to
+implement commands by serializing the underlying type as though it was a redis
+command. It uses the following rules & conventions:
 
 - The type should be a struct or enum. The name of the struct or name of
   the enum will be used as the command name. Tuples, lists, and maps cannot
   be commands.
+- All of the command arguments will be serialized as either strings or bytes
+  objects (preferring strings).
 - The fields in the type will be serialized as arguments, using these rules:
   - Fields will be serialized in order, and the field names will be ignored.
   - Primitive types like strings and numbers will be serialized as strings.

@@ -1,10 +1,10 @@
 use serde::{de, forward_to_deserialize_any, ser};
 
-/// Adapter for key-value pairs in Redis
+/// Adapter for key-value pairs in Redis.
 ///
 /// Commonly, Redis will express a set of key-value pairs as a flattened array
 /// of the keys and values. For instance, `HGETALL` returns something
-/// resembling `["key1", "value1", "key2", "value2"]`. `KeyValuePairs` allows
+/// resembling `["key1", "value1", "key2", "value2"]`. [`KeyValuePairs`] allows
 /// for rust maps and structs to be adapted in this way; a map or struct type
 /// wrapped in `KeyValuePairs` will serialize to, and deserialize from, a
 /// flattened array of key-value pairs.

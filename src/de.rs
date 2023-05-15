@@ -646,7 +646,6 @@ mod tests {
                     .map(Data::Array)
                 }
 
-
                 fn visit_unit<E>(self) -> Result<Self::Value, E>
                 where
                     E: de::Error,

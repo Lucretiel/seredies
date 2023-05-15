@@ -6,7 +6,7 @@ use std::{
     str::{from_utf8, FromStr},
 };
 
-use arrayvec::{ArrayString, ArrayVec};
+use arrayvec::ArrayString;
 use paste::paste;
 use serde::{de, forward_to_deserialize_any, ser};
 

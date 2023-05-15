@@ -1,10 +1,11 @@
 //! Low level parser implementations for RESP.
 //!
-//! The parsers and data types are available here for authors who want to
-//! write their own Redis abstractions, but they're designed to be very
-//! low-level. Usually you'll prefer to use the seredies Deserializer.
+//! The parsers and data types are available here for authors who want to write
+//! their own Redis abstractions, but they're designed to be very low-level.
+//! Usually you'll prefer to use the seredies
+//! [`Deserializer`][crate::de::Deserializer].
 //!
-//! The parsers here are not `nom` parsers, but are modeled after `nom`.
+//! The parsers here are modeled after [nom](https://docs.rs/nom).
 
 use memchr::memchr2;
 use thiserror::Error;
