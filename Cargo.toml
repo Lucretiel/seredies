@@ -27,3 +27,4 @@ serde = { version = "1.0.118", features = ["derive"], default-features = false }
 cool_asserts = "2.0.3"
 serde_test = "1.0.163"
 itertools = "0.10.3"
+tempfile = "3.5.0"

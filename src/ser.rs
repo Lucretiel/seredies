@@ -117,6 +117,17 @@ where
     Ok(buffer)
 }
 
+/// Serialize an object as RESP data to an [`io::Write`] destination, such as a
+/// [`File`][std::fs::File].
+pub fn to_writer<T>(data: &T, dest: impl io::Write) -> Result<(), Error>
+where
+    T: ser::Serialize + ?Sized,
+{
+    let mut dest = IoWrite(dest);
+    let serializer = Serializer::new(&mut dest);
+    data.serialize(serializer)
+}
+
 /// When serializing `Ok(())`, we prefer to serialize it as `"+OK\r\n"`
 /// instead of as a null. This trait switches the behavior for serializing a
 /// unit, allowing for this behavior
@@ -1140,10 +1151,13 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
 
     use serde::Serialize;
     use serde_bytes::Bytes;
+    use tempfile::tempfile;
 
     #[derive(Debug, Serialize)]
     #[serde(untagged)]
@@ -1304,5 +1318,36 @@ mod tests {
     #[test]
     fn test_result_error() {
         test_result_serializer::<(), &str>(Err("ERROR bad data"), b"-ERROR bad data\r\n")
+    }
+
+    #[test]
+    fn test_to_writer() {
+        use std::io::Read as _;
+        use std::io::Seek as _;
+
+        let mut file = tempfile().expect("failed to create tempfile");
+
+        let data = Vec::from([
+            Data::Integer(-5),
+            Data::Null,
+            Data::String(Bytes::new(b"data")),
+        ]);
+
+        to_writer(&data, &mut file).expect("failed to serialize to a file");
+        file.flush().expect("failed to flush the file");
+        file.rewind().expect("failed to seek the file");
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)
+            .expect("failed to read the file");
+
+        assert_eq!(
+            buffer,
+            b"\
+                *3\r\n\
+                :-5\r\n\
+                $-1\r\n\
+                $4\r\ndata\r\n\
+            "
+        )
     }
 }
