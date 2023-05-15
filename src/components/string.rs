@@ -1,13 +1,12 @@
 use std::{
     any::type_name,
-    fmt::Display,
-    io::Write as _,
+    fmt::{self, Display},
     marker::PhantomData,
     mem,
     str::{from_utf8, FromStr},
 };
 
-use arrayvec::ArrayVec;
+use arrayvec::{ArrayString, ArrayVec};
 use paste::paste;
 use serde::{de, forward_to_deserialize_any, ser};
 
@@ -31,12 +30,12 @@ use seredies::components::RedisString;
 use serde::{Serialize, Deserialize};
 use serde_test::{assert_tokens, assert_ser_tokens, Token};
 
-assert_tokens(&RedisString("Hello"), &[Token::BorrowedBytes(b"Hello")]);
-assert_tokens(&RedisString(5i32), &[Token::Bytes(b"5")]);
-assert_tokens(&RedisString(4.5), &[Token::Bytes(b"4.5")]);
+assert_tokens(&RedisString("Hello"), &[Token::BorrowedStr("Hello")]);
+assert_tokens(&RedisString(5i32), &[Token::Str("5")]);
+assert_tokens(&RedisString(4.5), &[Token::Str("4.5")]);
 
 let s: &RedisString<str> = RedisString::new_ref("string");
-assert_tokens(&s, &[Token::BorrowedBytes(b"string")]);
+assert_tokens(&s, &[Token::BorrowedStr("string")]);
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 struct UnitStruct;
@@ -47,8 +46,8 @@ enum Data {
     Bar
 }
 
-assert_tokens(&RedisString(UnitStruct), &[Token::Bytes(b"UnitStruct")]);
-assert_tokens(&RedisString(Data::Bar), &[Token::Bytes(b"Bar")]);
+assert_tokens(&RedisString(UnitStruct), &[Token::Str("UnitStruct")]);
+assert_tokens(&RedisString(Data::Bar), &[Token::Str("Bar")]);
 ```
 */
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -111,12 +110,14 @@ where
     fn serialize_number(self, value: impl Display) -> Result<S::Ok, S::Error> {
         // 39 digits should be enough for even a 128 bit int, but we'll round
         // way up to be safe
-        let mut buffer: ArrayVec<u8, 64> = ArrayVec::new();
+        use fmt::Write as _;
+
+        let mut buffer: ArrayString<64> = ArrayString::new();
 
         write!(&mut buffer, "{value}")
             .map_err(|_| ser::Error::custom("integer was more than 64 digits"))?;
 
-        self.0.serialize_bytes(&buffer)
+        self.0.serialize_str(&buffer)
     }
 }
 
@@ -210,7 +211,7 @@ where
 
     #[inline]
     fn serialize_str(self, v: &str) -> Result<Self::Ok, Self::Error> {
-        self.serialize_bytes(v.as_bytes())
+        self.0.serialize_str(v)
     }
 
     #[inline]

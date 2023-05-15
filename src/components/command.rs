@@ -11,8 +11,8 @@ use super::RedisString;
 /**
 Adapter type for serializing redis commands
 
-Redis commands are always delivered as a list of strings, regardless of
-the structure of the underlying command. This adapter type makes it easier
+Redis commands are always delivered as a list of string or byteses, regardless
+of the structure of the underlying command. This adapter type makes it easier
 to implement commands by serializing the underlying type as though it was
 a redis command. It uses the following rules & conventions:
 
@@ -44,6 +44,7 @@ use seredies::components::{RedisString, Command};
 
 use serde::Serialize;
 use serde_test::{assert_ser_tokens, Token};
+use serde_bytes::Bytes;
 
 /// The SET command. It includes a key and a value, as well as some optional
 /// behavior flags. Notice the use of `serde(rename)` to match the redis flag
@@ -111,16 +112,17 @@ let command = Command(Set{
 // to the seredies RESP serializer
 assert_ser_tokens(&command, &[
     Token::Seq { len: Some(3) },
-    Token::Bytes(b"SET"),
-    Token::Bytes(b"my-key"),
-    Token::Bytes(b"36"),
+    Token::Str("SET"),
+    Token::Str("my-key"),
+    Token::Str("36"),
     Token::SeqEnd,
 ]);
 
-// A more complex example
+// A more complex example. Notice that we can also send raw bytes data,
+// in addition to string data
 let command = Command(Set{
     key: "my-key".to_owned(),
-    value: RedisString(36),
+    value: RedisString(Bytes::new(b"123\xFF")),
 
     skip: Some(Skip::IfExists),
     expiry: Some(Expiry::Seconds(60)),
@@ -129,13 +131,13 @@ let command = Command(Set{
 
 assert_ser_tokens(&command, &[
     Token::Seq{len: Some(7)},
-    Token::Bytes(b"SET"),
-    Token::Bytes(b"my-key"),
-    Token::Bytes(b"36"),
-    Token::Bytes(b"NX"),
-    Token::Bytes(b"GET"),
-    Token::Bytes(b"EX"),
-    Token::Bytes(b"60"),
+    Token::Str("SET"),
+    Token::Str("my-key"),
+    Token::Bytes(&[b'1', b'2', b'3', 255]),
+    Token::Str("NX"),
+    Token::Str("GET"),
+    Token::Str("EX"),
+    Token::Str("60"),
     Token::SeqEnd,
 ]);
 
@@ -174,8 +176,8 @@ let command = Command(Scan{
 
 assert_ser_tokens(&command, &[
     Token::Seq { len: Some(2) },
-    Token::Bytes(b"SCAN"),
-    Token::Bytes(b"0"),
+    Token::Str("SCAN"),
+    Token::Str("0"),
     Token::SeqEnd
 ]);
 
@@ -188,12 +190,12 @@ let command = Command(Scan{
 
 assert_ser_tokens(&command, &[
     Token::Seq { len: Some(6) },
-    Token::Bytes(b"SCAN"),
-    Token::Bytes(b"10"),
-    Token::Bytes(b"COUNT"),
-    Token::Bytes(b"100"),
-    Token::Bytes(b"TYPE"),
-    Token::Bytes(b"zkey"),
+    Token::Str("SCAN"),
+    Token::Str("10"),
+    Token::Str("COUNT"),
+    Token::Str("100"),
+    Token::Str("TYPE"),
+    Token::Str("zkey"),
     Token::SeqEnd
 ]);
 ```
@@ -1225,9 +1227,9 @@ mod tests {
 
     #[derive(Serialize)]
     #[serde(rename = "SET")]
-    struct Set {
+    struct Set<T> {
         key: String,
-        value: i32,
+        value: RedisString<T>,
         /// If true, return the old value of the key after the SET
         #[serde(rename = "GET")]
         get: bool,
@@ -1239,7 +1241,7 @@ mod tests {
     fn test_basic_set() {
         let command = Command(Set {
             key: "my-key".to_owned(),
-            value: 36,
+            value: RedisString(36),
             get: false,
             skip: None,
             expiry: None,
@@ -1249,9 +1251,9 @@ mod tests {
             &command,
             &[
                 Token::Seq { len: Some(3) },
-                Token::Bytes(b"SET"),
-                Token::Bytes(b"my-key"),
-                Token::Bytes(b"36"),
+                Token::Str("SET"),
+                Token::Str("my-key"),
+                Token::Str("36"),
                 Token::SeqEnd,
             ],
         );
@@ -1261,7 +1263,7 @@ mod tests {
     fn test_set_params() {
         let command = Command(Set {
             key: "my-key".to_owned(),
-            value: -10,
+            value: RedisString(-10),
             get: true,
             skip: Some(Skip::XX),
             expiry: Some(Expiry::Seconds(60)),
@@ -1271,13 +1273,35 @@ mod tests {
             &command,
             &[
                 Token::Seq { len: Some(7) },
-                Token::Bytes(b"SET"),
-                Token::Bytes(b"my-key"),
-                Token::Bytes(b"-10"),
-                Token::Bytes(b"GET"),
-                Token::Bytes(b"XX"),
-                Token::Bytes(b"EX"),
-                Token::Bytes(b"60"),
+                Token::Str("SET"),
+                Token::Str("my-key"),
+                Token::Str("-10"),
+                Token::Str("GET"),
+                Token::Str("XX"),
+                Token::Str("EX"),
+                Token::Str("60"),
+                Token::SeqEnd,
+            ],
+        )
+    }
+
+    #[test]
+    fn test_raw_bytes() {
+        let command = Command(Set {
+            key: "bytes-key".to_owned(),
+            value: RedisString(Bytes::new(b"\0abc\xFF")),
+            get: false,
+            skip: None,
+            expiry: None,
+        });
+
+        assert_ser_tokens(
+            &command,
+            &[
+                Token::Seq { len: Some(3) },
+                Token::Str("SET"),
+                Token::Str("bytes-key"),
+                Token::Bytes(&[0, b'a', b'b', b'c', 255]),
                 Token::SeqEnd,
             ],
         )
@@ -1306,16 +1330,16 @@ mod tests {
             &command,
             &[
                 Token::Seq { len: Some(10) },
-                Token::Bytes(b"HMSET"),
-                Token::Bytes(b"hash-key"),
-                Token::Bytes(b"key1"),
-                Token::Bytes(b"value1"),
-                Token::Bytes(b"key2"),
-                Token::Bytes(b"value2"),
-                Token::Bytes(b"key3"),
-                Token::Bytes(b"value3"),
-                Token::Bytes(b"key4"),
-                Token::Bytes(b"value4"),
+                Token::Str("HMSET"),
+                Token::Str("hash-key"),
+                Token::Str("key1"),
+                Token::Str("value1"),
+                Token::Str("key2"),
+                Token::Str("value2"),
+                Token::Str("key3"),
+                Token::Str("value3"),
+                Token::Str("key4"),
+                Token::Str("value4"),
                 Token::SeqEnd,
             ],
         )
