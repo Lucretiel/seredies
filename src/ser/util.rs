@@ -1,3 +1,5 @@
+//! Utility types to support the serializer implementations.
+
 use serde::ser;
 
 /// Utility type intended to reduce serde serializer boilerplate.

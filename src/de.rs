@@ -4,6 +4,9 @@ Serde deserializer for turning Redis RESP data into Rust data structures.
 This module contains a faithful implementation of the
 [Redis Serialization Protocol](https://redis.io/docs/reference/protocol-spec/).
 
+See the [crate docs][crate] for an overview of how seredies maps the RESP data
+model to the serde data model.
+
 # Basic example
 
 ```
@@ -46,57 +49,7 @@ assert_eq!(
 );
 ```
 
-# Faithful
-
-`seredies` is a mostly faithful serde implementation of RESP. This means that
-it (mostly) doesn't try to go above and beyond what the RESP data model can
-express, which is mostly strings, integers, and arrays. In particular it's not
-capable of deserializing structs, maps, or complex enums. Instead, `seredies`
-provides a collection of [components][crate::components], which implement
-translate common patterns into Redis's minimal data model. This ensures that
-developers should never be surprised by the deserializer trying to do
-something unexpectedly "clever", but can opt-in to more streamlined behavior.
-
-## Supported types:
-
-- `bool` (treated as an integer 1 or 0)
-- All integers
-- Sequences, tuples, and tuple structs
-- Bytes and string types
-    - Technically we don't support strings separately, but by default most
-      string types will deserialize themselves from `bytes` data.
-    - See the [RedisString][crate::components::RedisString] component for a
-      wrapper type that converts any primitive value to or from a Redis string.
-    - RESP is totally binary safe, so it's easy to deserialize &str and other
-      borrowed data from the payload.
-- Result (see below).
-- Option: similar to JSON, an option is handled as either a null or as an
-  untagged value.
-
-## Unsupported types:
-
-- Floats.
-    - Consider [RedisString][crate::components::RedisString] for the common
-      case that Redis is treating your float data as a string.
-- Maps, structs, complex enums.
-    - Consider [KeyValuePairs][crate::components::KeyValuePairs] for the common
-      case that your key-value data is being treated by Redis as a flattened
-      array of key-value pairs.
-
-# Errors and Results
-
-RESP includes an [error type], which is delivered in the response when
-something has gone wrong. By default, this error type is treated as a
-deserialize error, and appears as the [`Error::Redis`] variant when encountered.
-However, you can instead handle them directly by deserializing a [`Result`]
-directly; in this case, the `Ok` variant will contain the deserialized data,
-and a successfully deserialized `Err` variant will contain a redis error.
-
-Additionally, seredies ubiquitously uses the simple string "OK" to signal an
-uninteresting success. This pattern is so common that `seredies` supports
-deserializing it directly to an `Ok(())` [`Result`] value.
-
-## Error example
+# Error example
 
 ```
 use seredies::de::{from_bytes, Error};
@@ -113,7 +66,7 @@ let data: Result<Vec<i32>, String> = from_bytes(error).expect("deserialize shoul
 assert_eq!(data, Err("ERR unknown command \"helloworld\"".to_owned()));
 ```
 
-## `Result::Ok` example
+# `Result::Ok` example
 
 ```
 use seredies::de::from_bytes;
@@ -645,7 +598,7 @@ mod tests {
 
     impl<'a, T: Into<Data<'a>>, const N: usize> From<[T; N]> for Data<'a> {
         fn from(array: [T; N]) -> Self {
-            Self::Array(array.into_iter().map(|value| value.into()).collect())
+            Self::Array(array.into_iter().map(Into::into).collect())
         }
     }
 
@@ -692,6 +645,7 @@ mod tests {
                     )
                     .map(Data::Array)
                 }
+
 
                 fn visit_unit<E>(self) -> Result<Self::Value, E>
                 where
