@@ -4,6 +4,7 @@
     "EXAT",
     "HGETALL",
     "HMSET",
+    "ilog",
     "KEEPTTL",
     "PXAT",
     "seredies",

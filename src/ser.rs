@@ -602,14 +602,55 @@ impl ser::Error for Error {
     }
 }
 
-fn serialize_number(dest: &mut impl Output, value: impl TryInto<i64>) -> Result<(), Error> {
-    let value = value.try_into().map_err(|_| Error::NumberOutOfRange)?;
-    dest.reserve(4);
-    write!(dest, ":{value}\r\n",)
+/// Write a redis header containing `value` to the `output`, using the `prefix`.
+/// This method will reserve space in the `output` sufficient to contain the
+/// header, plus additional space equal to `suffix_reserve`.
+fn serialize_header(
+    output: &mut impl Output,
+    prefix: u8,
+    value: impl TryInto<i64>,
+    suffix_reserve: usize,
+) -> Result<(), Error> {
+    let prefix = prefix as char;
+    debug_assert!("*:$".contains(prefix));
+
+    let value: i64 = value.try_into().map_err(|_| Error::NumberOutOfRange)?;
+
+    // TODO: better calculation how many digits / characters are required for
+    // `value`. This can be based on ilog10 but there's a bunch of edge cases
+    // that need to be handled (zero, negatives). For now we conservatively
+    // assume it fits in 1 character.
+    let width = suffix_reserve.saturating_add(4);
+
+    output.reserve(width);
+    write!(output, "{prefix}{value}\r\n")
+}
+
+#[inline]
+fn serialize_number(output: &mut impl Output, value: impl TryInto<i64>) -> Result<(), Error> {
+    serialize_header(output, b':', value, 0)
+}
+
+/// Given an array of length `len`, estimate how many bytes are reasonable
+/// to reserve in an output buffer that will contain that array. This should
+/// *mostly* be the lower bound but can make certain practical estimates about
+/// the data that is *likely* to be contained.
+#[inline]
+#[must_use]
+const fn estimate_array_reservation(len: usize) -> usize {
+    // By far the most common thing we serialize is a bulk string (for a
+    // command), and the smallest bulk string (an empty one) is 6 bytes, so
+    // that's the factor we use.
+    len.saturating_mul(6)
+}
+
+#[inline]
+fn serialize_array_header(output: &mut impl Output, len: usize) -> Result<(), Error> {
+    serialize_header(output, b'*', len, estimate_array_reservation(len))
 }
 
 fn serialize_bulk_string(
-    dest: &mut impl Output,
+    output: &mut impl Output,
     value: &(impl Writable + ?Sized),
 ) -> Result<(), Error> {
     let len: i64 = value
@@ -617,11 +658,9 @@ fn serialize_bulk_string(
         .try_into()
         .map_err(|_| Error::NumberOutOfRange)?;
 
-    // God only knows what'll happen to you if this saturates
-    dest.reserve(value.len().saturating_add(6));
-    write!(dest, "${len}\r\n")?;
-    value.write_to_output(dest)?;
-    dest.write_str("\r\n")
+    serialize_header(output, b'$', len, value.len().saturating_add(2))?;
+    value.write_to_output(output)?;
+    output.write_str("\r\n")
 }
 
 fn serialize_error(dest: &mut impl Output, value: &(impl Writable + ?Sized)) -> Result<(), Error> {
@@ -821,9 +860,8 @@ where
             .map(|adapter| adapter.inner)
     }
 
-    #[inline]
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
-        write!(self.output, "*{len}\r\n")?;
+        serialize_array_header(self.output, len)?;
         Ok(TupleSeqAdapter::new(SerializeSeq::new(self.output, len)))
     }
 
@@ -907,6 +945,9 @@ where
     where
         T: serde::Serialize,
     {
+        self.output
+            .reserve(estimate_array_reservation(self.remaining));
+
         match self.remaining.checked_sub(1) {
             Some(remain) => self.remaining = remain,
             None => return Err(Error::BadSeqLength),
