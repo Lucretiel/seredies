@@ -72,6 +72,7 @@ uninteresting success. This pattern is so common that `seredies` supports
 */
 
 #![deny(missing_docs)]
+#![cfg_attr(not(feature="std"), no_std)]
 
 pub mod components;
 pub mod de;

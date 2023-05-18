@@ -1,3 +1,5 @@
+use core::fmt;
+
 use serde::{de, forward_to_deserialize_any, ser};
 
 /// Adapter for key-value pairs in Redis.
@@ -366,7 +368,7 @@ where
 {
     type Value = V::Value;
 
-    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         write!(formatter, "an flattened array of key-value pairs")?;
         self.0.expecting(formatter)
     }

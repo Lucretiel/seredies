@@ -78,20 +78,29 @@ assert_eq!(
 ```
 */
 
+mod output;
 pub mod util;
 
 use core::fmt;
-use std::io;
 
 use arrayvec::ArrayString;
-use memchr::memchr2;
+use displaydoc::Display;
 use paste::paste;
 use serde::ser;
+
+pub use self::output::Output;
+use self::output::Writable;
+
+#[cfg(feature = "std")]
+pub use self::output::IoWrite;
+
+#[cfg(feature = "std")]
 use thiserror::Error;
 
 use self::util::TupleSeqAdapter;
 
 /// Serialize an object as a RESP byte buffer.
+#[cfg(feature = "std")]
 pub fn to_vec<T>(data: &T) -> Result<Vec<u8>, Error>
 where
     T: ser::Serialize + ?Sized,
@@ -107,6 +116,7 @@ where
 /// Note that RESP is a binary protocol, so if there is any non-UTF-8
 /// data in `data`, the serialization will fail with
 /// [`Error::Utf8Encode`]. Most data should be fine, though.
+#[cfg(feature = "std")]
 pub fn to_string<T>(data: &T) -> Result<String, Error>
 where
     T: ser::Serialize + ?Sized,
@@ -119,7 +129,8 @@ where
 
 /// Serialize an object as RESP data to an [`io::Write`] destination, such as a
 /// [`File`][std::fs::File].
-pub fn to_writer<T>(data: &T, dest: impl io::Write) -> Result<(), Error>
+#[cfg(feature = "std")]
+pub fn to_writer<T>(data: &T, dest: impl std::io::Write) -> Result<(), Error>
 where
     T: ser::Serialize + ?Sized,
 {
@@ -142,7 +153,6 @@ struct NullUnit;
 impl UnitBehavior for NullUnit {
     #[inline(always)]
     #[must_use]
-
     fn unit_payload(self) -> &'static str {
         "$-1\r\n"
     }
@@ -191,189 +201,6 @@ macro_rules! forward {
             forward_one! { $method $(<$Generic>)? $(($($($arg : $type),+)?) $(-> $Ret)? )? }
         )*
     };
-}
-
-/// The [`Output`] trait is used as a destination for writing bytes by the
-/// [`Serializer`]. It serves a similar role as [`io::Write`] or [`fmt::Write`],
-/// but allows for the serializer to work in `#[no_std]` contexts.
-pub trait Output {
-    /// Hint that there are upcoming writes totalling this number of
-    /// bytes
-    fn reserve(&mut self, count: usize);
-
-    /// Append string data to the output.
-    fn write_str(&mut self, s: &str) -> Result<(), Error>;
-
-    /// Append bytes data to the output.
-    fn write_bytes(&mut self, b: &[u8]) -> Result<(), Error>;
-
-    /// Append formatted data to the output. This method allows
-    /// [`Output`] objects to be used as the destination of a [`write!`] call.
-    fn write_fmt(&mut self, fmt: fmt::Arguments<'_>) -> Result<(), Error> {
-        if let Some(s) = fmt.as_str() {
-            return self.write_str(s);
-        }
-        struct Adapter<T> {
-            output: T,
-            result: Result<(), Error>,
-        }
-
-        impl<T: Output> fmt::Write for Adapter<T> {
-            fn write_str(&mut self, s: &str) -> fmt::Result {
-                self.output.write_str(s).map_err(|err| {
-                    self.result = Err(err);
-                    fmt::Error
-                })
-            }
-        }
-
-        let mut adapter = Adapter {
-            output: self,
-            result: Ok(()),
-        };
-
-        let res = fmt::write(&mut adapter, fmt);
-
-        debug_assert!(match adapter.result.as_ref() {
-            Ok(()) => res.is_ok(),
-            Err(_) => res.is_err(),
-        });
-
-        adapter.result
-    }
-
-    // TODO: vectored write support
-}
-
-trait Writable {
-    fn write_to_output(&self, output: &mut impl Output) -> Result<(), Error>;
-
-    #[must_use]
-    fn len(&self) -> usize;
-
-    #[must_use]
-    fn safe(&self) -> bool;
-}
-
-impl Writable for [u8] {
-    #[inline]
-    fn write_to_output(&self, output: &mut impl Output) -> Result<(), Error> {
-        output.write_bytes(self)
-    }
-
-    #[inline]
-    #[must_use]
-    fn len(&self) -> usize {
-        self.len()
-    }
-
-    #[inline]
-    #[must_use]
-    fn safe(&self) -> bool {
-        memchr2(b'\r', b'\n', self).is_none()
-    }
-}
-
-impl Writable for str {
-    #[inline]
-    fn write_to_output(&self, output: &mut impl Output) -> Result<(), Error> {
-        output.write_str(self)
-    }
-
-    #[inline]
-    #[must_use]
-    fn len(&self) -> usize {
-        self.len()
-    }
-
-    #[inline]
-    #[must_use]
-    fn safe(&self) -> bool {
-        self.as_bytes().safe()
-    }
-}
-
-impl<T: Output + ?Sized> Output for &mut T {
-    #[inline]
-    fn write_str(&mut self, s: &str) -> Result<(), Error> {
-        T::write_str(*self, s)
-    }
-
-    #[inline]
-    fn write_bytes(&mut self, b: &[u8]) -> Result<(), Error> {
-        T::write_bytes(*self, b)
-    }
-
-    #[inline]
-    fn write_fmt(&mut self, fmt: fmt::Arguments<'_>) -> Result<(), Error> {
-        T::write_fmt(*self, fmt)
-    }
-
-    #[inline]
-    fn reserve(&mut self, count: usize) {
-        T::reserve(*self, count)
-    }
-}
-
-impl Output for Vec<u8> {
-    #[inline]
-    fn write_str(&mut self, s: &str) -> Result<(), Error> {
-        self.write_bytes(s.as_bytes())
-    }
-
-    #[inline]
-    fn write_bytes(&mut self, s: &[u8]) -> Result<(), Error> {
-        self.extend_from_slice(s);
-        Ok(())
-    }
-
-    #[inline]
-    fn reserve(&mut self, count: usize) {
-        self.reserve(count)
-    }
-}
-
-impl Output for String {
-    #[inline]
-    fn write_str(&mut self, s: &str) -> Result<(), Error> {
-        self.push_str(s);
-        Ok(())
-    }
-
-    #[inline]
-    fn write_bytes(&mut self, b: &[u8]) -> Result<(), Error> {
-        self.write_str(std::str::from_utf8(b).map_err(|_| Error::Utf8Encode)?)
-    }
-
-    #[inline]
-    fn reserve(&mut self, count: usize) {
-        self.reserve(count)
-    }
-}
-
-/// [`Output`] adapter type for serializing to an [`io::Write`] object, such as a file
-/// or pipeline.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct IoWrite<T>(pub T);
-
-impl<T: io::Write> Output for IoWrite<T> {
-    #[inline]
-    fn reserve(&mut self, _count: usize) {}
-
-    #[inline]
-    fn write_str(&mut self, s: &str) -> Result<(), Error> {
-        self.write_bytes(s.as_bytes())
-    }
-
-    #[inline]
-    fn write_bytes(&mut self, b: &[u8]) -> Result<(), Error> {
-        self.0.write_all(b).map_err(Error::Io)
-    }
-
-    #[inline]
-    fn write_fmt(&mut self, fmt: fmt::Arguments<'_>) -> Result<(), Error> {
-        self.0.write_fmt(fmt).map_err(Error::Io)
-    }
 }
 
 /// A RESP Serializer.
@@ -487,7 +314,7 @@ where
     #[inline]
     fn collect_str<T: ?Sized>(self, value: &T) -> Result<Self::Ok, Self::Error>
     where
-        T: std::fmt::Display,
+        T: fmt::Display,
     {
         self.inner.collect_str(value)
     }
@@ -527,12 +354,13 @@ where
 }
 
 /// Errors that can occur during serialization.
-#[derive(Debug, Error)]
+#[derive(Debug, Display)]
+#[cfg_attr(feature = "std", derive(thiserror::Error))]
 #[non_exhaustive]
 pub enum Error {
     /// Certain types can't be serialized. The argument contains the kind of
     /// type that failed to serialize.
-    #[error("can't serialize {0}")]
+    #[displaydoc("can't serialize {0}")]
     UnsupportedType(&'static str),
 
     /// Attempted to serialize a number that was outside the range of a signed
@@ -542,7 +370,7 @@ pub enum Error {
     /// they contain numeric data. Consider using
     /// [`RedisString`][crate::components::RedisString] or
     /// [`Command`][crate::components::Command] in this case.
-    #[error("can't serialize numbers outside the range of a signed 64 bit integer")]
+    #[displaydoc("can't serialize numbers outside the range of a signed 64 bit integer")]
     NumberOutOfRange,
 
     /// Redis arrays are length-prefixed; they must know the length ahead of
@@ -550,13 +378,13 @@ pub enum Error {
     /// length. Consider using [`Command`][crate::components::Command] if you're
     /// trying to serialize a Redis command, as it automatically handles
     /// efficiently computing the length of the array (without allocating).
-    #[error("can't serialize sequences of unknown length")]
+    #[displaydoc("can't serialize sequences of unknown length")]
     UnknownSeqLength,
 
     /// Attempted to serialize too many or too few sequence elements. This error
     /// occurs when the number of serialized array elements differed from the
     /// prefix-reported length of the array.
-    #[error("attempted to serialize too many or too few sequence elements")]
+    #[displaydoc("attempted to serialize too many or too few sequence elements")]
     BadSeqLength,
 
     /// Attempted to serialize a RESP [Simple String] or [Error] that contained
@@ -565,30 +393,36 @@ pub enum Error {
     /// [Simple String]:
     ///     https://redis.io/docs/reference/protocol-spec/#resp-simple-strings
     /// [Error]: https://redis.io/docs/reference/protocol-spec/#resp-errors
-    #[error("attempted to serialize a Simple String that contained a \\r or \\n")]
+    #[displaydoc("attempted to serialize a Simple String that contained a \\r or \\n")]
     BadSimpleString,
 
     /// There was an i/o error during serialization. Generally this can only
     /// happen when serializing to a "real" i/o device, like a file.
-    #[error("i/o error during serialization")]
-    Io(#[from] io::Error),
+    #[displaydoc("i/o error during serialization")]
+    #[cfg(feature = "std")]
+    Io(#[from] std::io::Error),
 
     /// The data being serialized encountered some kind of error, separate from
     /// the RESP protocol.
-    #[error("error from Serialize type: {0}")]
+    #[displaydoc("error from Serialize type: {0}")]
+    #[cfg(feature = "std")]
     Custom(String),
+
+    #[displaydoc("error from Serialize type: {0}")]
+    #[cfg(not(feature = "std"))]
+    Custom(&'static str),
 
     /// Attempted to serialize something other than a string, bytes, or unit
     /// enum as a RESP [Error].
     ///
     /// [Error]: https://redis.io/docs/reference/protocol-spec/#resp-errors
-    #[error("invalid payload for a Result::Err. Must be a string or simple enum")]
+    #[displaydoc("invalid payload for a Result::Err. Must be a string or simple enum")]
     InvalidErrorPayload,
 
     /// Attempted to encode non-UTF-8 data. This error can only occur when the
     /// [`Output`] type must be UTF-8 data (such as a [`String`]); most output
     /// types can accept arbitrary bytes.
-    #[error("attempted to encode non-UTF-8 data to a string-like destination")]
+    #[displaydoc("attempted to encode non-UTF-8 data to a string-like destination")]
     Utf8Encode,
 }
 
@@ -596,7 +430,7 @@ impl ser::Error for Error {
     #[inline]
     fn custom<T>(msg: T) -> Self
     where
-        T: std::fmt::Display,
+        T: fmt::Display,
     {
         Self::Custom(msg.to_string())
     }
@@ -759,8 +593,7 @@ where
 
     #[inline]
     fn serialize_char(self, v: char) -> Result<Self::Ok, Self::Error> {
-        let mut buf = [0; 4];
-        self.serialize_str(v.encode_utf8(&mut buf))
+        serialize_bulk_string(self.output, &v)
     }
 
     #[inline]
@@ -770,9 +603,9 @@ where
 
     fn collect_str<T: ?Sized>(self, value: &T) -> Result<Self::Ok, Self::Error>
     where
-        T: std::fmt::Display,
+        T: fmt::Display,
     {
-        use std::fmt::Write as _;
+        use fmt::Write as _;
 
         // We assume that things that need to be collected as strings are
         // usually pretty short, so we try first to serialize to a local buffer.
@@ -1191,6 +1024,7 @@ where
 }
 
 #[cfg(test)]
+#[cfg(feature = "std")]
 mod tests {
     use std::io::Write;
 

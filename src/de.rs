@@ -90,11 +90,11 @@ assert_eq!(result, Err("ERR error message"));
 pub mod parse;
 mod result;
 
-use std::fmt::Display;
+use core::fmt;
 
+use displaydoc::Display;
 use paste::paste;
 use serde::{de, forward_to_deserialize_any};
-use thiserror::Error;
 
 use self::parse::{ParseResult, TaggedHeader};
 use self::result::ResultAccess;
@@ -115,38 +115,40 @@ where
 }
 
 /// Errors that can occur while deserializing RESP data.
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone, Display)]
+#[cfg_attr(feature = "std", derive(thiserror::Error))]
 #[non_exhaustive]
 pub enum Error {
     /// There was an error during parsing (such as a \r without a \n).
-    #[error("parsing error")]
-    Parse(#[from] parse::Error),
+    #[displaydoc("parsing error")]
+    Parse(#[cfg_attr(feature = "std", cause)] parse::Error),
 
     /// The length of an array or bulk string was out of bounds. It might
     /// have been negative, or exceeded the 512MB limit for bulk strings.
-    #[error("an array or bulk string length was out of bounds")]
+    #[displaydoc("an array or bulk string length was out of bounds")]
     Length,
 
     /// There was leftover data in the input after the deserialize operation.
     /// This is only returned by [`from_str`] and similar functions; the
     /// [`Deserializer`] itself will normally just leave that data untouched,
     /// to facilitate response pipelining.
-    #[error("the deserialize completed, but didn't consume the entire input")]
+    #[displaydoc("the deserialize completed, but didn't consume the entire input")]
     TrailingData,
 
     /// The `Deserialize` type successfully deserialized from a Redis array,
     /// but didn't consume the whole thing.
-    #[error("the `Deserialize` type didn't consume the entire array")]
+    #[displaydoc("the `Deserialize` type didn't consume the entire array")]
     UnfinishedArray,
 
     /// There was an error from the `Deserialize` type
-    #[error("error from Deserialize type: {0}")]
+    #[displaydoc("error from Deserialize type: {0}")]
+    #[cfg(feature="std")]
     Custom(String),
 
     /// We *successfully* deserialized a Redis Error value (with the `-` tag)
     /// See the module docs on `Result` deserialization for how to avoid this
     /// error.
-    #[error("successfully deserialized a Redis Error containing this message")]
+    #[displaydoc("successfully deserialized a Redis Error containing this message")]
     Redis(Vec<u8>),
 }
 
