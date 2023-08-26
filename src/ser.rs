@@ -945,14 +945,14 @@ where
     where
         T: serde::Serialize,
     {
-        self.output
-            .reserve(estimate_array_reservation(self.remaining));
+        let reserve = estimate_array_reservation(self.remaining);
 
         match self.remaining.checked_sub(1) {
             Some(remain) => self.remaining = remain,
             None => return Err(Error::BadSeqLength),
         }
 
+        self.output.reserve(reserve);
         value.serialize(BaseSerializer::new(self.output))
     }
 

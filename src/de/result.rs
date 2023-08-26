@@ -5,31 +5,6 @@ use serde::{de, forward_to_deserialize_any};
 
 use super::{Error, PreParsedDeserializer};
 
-#[derive(Debug, Clone, Copy)]
-enum ResultVariant {
-    Ok,
-    Err,
-}
-
-impl ResultVariant {
-    #[inline]
-    #[must_use]
-    const fn get(self) -> &'static str {
-        match self {
-            ResultVariant::Ok => "Ok",
-            ResultVariant::Err => "Err",
-        }
-    }
-}
-
-trait ResultAccessPattern<'de> {
-    const VARIANT: ResultVariant;
-
-    fn value<T>(self, seed: T) -> Result<T::Value, Error>
-    where
-        T: de::DeserializeSeed<'de>;
-}
-
 pub(super) struct ResultAccess<T> {
     access: T,
 }
@@ -75,7 +50,7 @@ impl<'de, T: ResultAccessPattern<'de>> de::EnumAccess<'de> for ResultAccess<T> {
     where
         V: de::DeserializeSeed<'de>,
     {
-        seed.deserialize(de::value::BorrowedStrDeserializer::new(T::VARIANT.get()))
+        seed.deserialize(de::value::BorrowedStrDeserializer::new(T::VARIANT))
             .map(|value| (value, self))
     }
 }
@@ -126,10 +101,19 @@ impl<'de, T: ResultAccessPattern<'de>> de::VariantAccess<'de> for ResultAccess<T
     }
 }
 
+trait ResultAccessPattern<'de> {
+    /// The name of the result variant being accessed, either `Ok` or `Err`.
+    const VARIANT: &'static str;
+
+    fn value<T>(self, seed: T) -> Result<T::Value, Error>
+    where
+        T: de::DeserializeSeed<'de>;
+}
+
 pub struct ResultPlainOkPattern;
 
 impl<'de> ResultAccessPattern<'de> for ResultPlainOkPattern {
-    const VARIANT: ResultVariant = ResultVariant::Ok;
+    const VARIANT: &'static str = "Ok";
 
     #[inline]
     fn value<T>(self, seed: T) -> Result<T::Value, Error>
@@ -145,7 +129,7 @@ impl<'de> de::Deserializer<'de> for ResultPlainOkPattern {
 
     forward_to_deserialize_any! {
         bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
-        bytes byte_buf option unit_struct newtype_struct seq tuple
+        option unit_struct newtype_struct seq tuple
         tuple_struct map struct identifier ignored_any enum
     }
 
@@ -154,7 +138,23 @@ impl<'de> de::Deserializer<'de> for ResultPlainOkPattern {
     where
         V: de::Visitor<'de>,
     {
+        visitor.visit_borrowed_str("OK")
+    }
+
+    #[inline]
+    fn deserialize_bytes<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: de::Visitor<'de>,
+    {
         visitor.visit_borrowed_bytes(b"OK")
+    }
+
+    #[inline]
+    fn deserialize_byte_buf<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: de::Visitor<'de>,
+    {
+        self.deserialize_bytes(visitor)
     }
 
     #[inline]
@@ -171,7 +171,7 @@ pub struct ResultOkPattern<'a, 'de> {
 }
 
 impl<'de> ResultAccessPattern<'de> for ResultOkPattern<'_, 'de> {
-    const VARIANT: ResultVariant = ResultVariant::Ok;
+    const VARIANT: &'static str = "Ok";
 
     #[inline]
     fn value<T>(self, seed: T) -> Result<T::Value, Error>
@@ -187,7 +187,7 @@ pub struct ResultErrPattern<'de> {
 }
 
 impl<'de> ResultAccessPattern<'de> for ResultErrPattern<'de> {
-    const VARIANT: ResultVariant = ResultVariant::Err;
+    const VARIANT: &'static str = "Err";
 
     #[inline]
     fn value<T>(self, seed: T) -> Result<T::Value, Error>
