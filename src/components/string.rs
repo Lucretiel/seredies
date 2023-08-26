@@ -545,7 +545,11 @@ impl<'de, D: de::Deserializer<'de>> de::Deserializer<'de> for RedisStringAdapter
             where
                 E: de::Error,
             {
-                self.visit_bytes(v.as_bytes())
+                if v == self.name {
+                    self.visitor.visit_unit()
+                } else {
+                    Err(de::Error::invalid_value(de::Unexpected::Str(v), &self))
+                }
             }
         }
 
@@ -579,6 +583,17 @@ impl<'de, D: de::Deserializer<'de>> de::Deserializer<'de> for RedisStringAdapter
             error: PhantomData<E>,
         }
 
+        impl<T, E> Adapter<T, E> {
+            #[inline]
+            #[must_use]
+            const fn new(inner: T) -> Self {
+                Self {
+                    inner,
+                    error: PhantomData,
+                }
+            }
+        }
+
         impl<'de, V: de::Visitor<'de>, E2> de::Visitor<'de> for Adapter<V, E2> {
             type Value = V::Value;
 
@@ -587,21 +602,20 @@ impl<'de, D: de::Deserializer<'de>> de::Deserializer<'de> for RedisStringAdapter
                 self.inner.expecting(formatter)
             }
 
+            #[inline]
             fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
             where
                 E: de::Error,
             {
-                self.visit_bytes(v.as_bytes())
+                self.inner.visit_enum(Adapter::new(v))
             }
 
+            #[inline]
             fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
             where
                 E: de::Error,
             {
-                self.inner.visit_enum(Adapter {
-                    inner: v,
-                    error: PhantomData,
-                })
+                self.inner.visit_enum(Adapter::new(v))
             }
         }
 
@@ -614,25 +628,32 @@ impl<'de, D: de::Deserializer<'de>> de::Deserializer<'de> for RedisStringAdapter
                 V: de::DeserializeSeed<'de>,
             {
                 seed.deserialize(de::value::BytesDeserializer::new(self.inner))
-                    .map(|value| {
-                        (
-                            value,
-                            Adapter {
-                                inner: (),
-                                error: PhantomData,
-                            },
-                        )
-                    })
+                    .map(|value| (value, Adapter::new(())))
+            }
+        }
+
+        impl<'de, 'a, E: de::Error> de::EnumAccess<'de> for Adapter<&'a str, E> {
+            type Error = E;
+            type Variant = Adapter<(), E>;
+
+            fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Self::Error>
+            where
+                V: de::DeserializeSeed<'de>,
+            {
+                seed.deserialize(de::value::StrDeserializer::new(self.inner))
+                    .map(|value| (value, Adapter::new(())))
             }
         }
 
         impl<'de, E: de::Error> de::VariantAccess<'de> for Adapter<(), E> {
             type Error = E;
 
+            #[inline]
             fn unit_variant(self) -> Result<(), Self::Error> {
                 Ok(())
             }
 
+            #[inline]
             fn newtype_variant_seed<T>(self, _seed: T) -> Result<T::Value, Self::Error>
             where
                 T: de::DeserializeSeed<'de>,
@@ -643,6 +664,7 @@ impl<'de, D: de::Deserializer<'de>> de::Deserializer<'de> for RedisStringAdapter
                 ))
             }
 
+            #[inline]
             fn tuple_variant<V>(self, _len: usize, _visitor: V) -> Result<V::Value, Self::Error>
             where
                 V: de::Visitor<'de>,
@@ -653,6 +675,7 @@ impl<'de, D: de::Deserializer<'de>> de::Deserializer<'de> for RedisStringAdapter
                 ))
             }
 
+            #[inline]
             fn struct_variant<V>(
                 self,
                 _fields: &'static [&'static str],
