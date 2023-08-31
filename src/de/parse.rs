@@ -135,7 +135,10 @@ pub fn read_header(input: &[u8]) -> ParseResult<'_, TaggedHeader<'_>> {
             -1 => TaggedHeader::Null,
             len => TaggedHeader::BulkString(len),
         }),
-        b'*' => parse_number(payload).map(TaggedHeader::Array),
+        b'*' => parse_number(payload).map(|len| match len {
+            -1 => TaggedHeader::Null,
+            len => TaggedHeader::Array(len),
+        }),
         tag => Err(Error::BadTag(tag)),
     }
     .map(|header| (header, input))
@@ -256,7 +259,7 @@ mod tests {
             bulk_string: b"$3\r\nabc\r\n" == Ok((TaggedHeader::BulkString(3), b"abc\r\n")),
             null: b"$-1\r\nabc\r\n" == Ok((TaggedHeader::Null, b"abc\r\n")),
             array: b"*1\r\n+OK\r\n" == Ok((TaggedHeader::Array(1), b"+OK\r\n")),
-
+            null_array: b"*-1\r\nabc\r\n" == Ok((TaggedHeader::Null, b"abc\r\n")),
             bad_tag: b"xABC\r\n" == Err(Error::BadTag(b'x')),
             incomplete: b"+OK\r" == Err(Error::UnexpectedEof(1)),
         }

@@ -78,17 +78,18 @@ assert_eq!(
 ```
 */
 
+mod output;
+mod primitives;
 pub mod util;
 
-use core::fmt;
 use std::io;
 
 use arrayvec::ArrayString;
-use memchr::memchr2;
 use paste::paste;
 use serde::ser;
 use thiserror::Error;
 
+pub use self::output::{IoWrite, Output};
 use self::util::TupleSeqAdapter;
 
 /// Serialize an object as a RESP byte buffer.
@@ -142,7 +143,6 @@ struct NullUnit;
 impl UnitBehavior for NullUnit {
     #[inline(always)]
     #[must_use]
-
     fn unit_payload(self) -> &'static str {
         "$-1\r\n"
     }
@@ -191,189 +191,6 @@ macro_rules! forward {
             forward_one! { $method $(<$Generic>)? $(($($($arg : $type),+)?) $(-> $Ret)? )? }
         )*
     };
-}
-
-/// The [`Output`] trait is used as a destination for writing bytes by the
-/// [`Serializer`]. It serves a similar role as [`io::Write`] or [`fmt::Write`],
-/// but allows for the serializer to work in `#[no_std]` contexts.
-pub trait Output {
-    /// Hint that there are upcoming writes totalling this number of
-    /// bytes
-    fn reserve(&mut self, count: usize);
-
-    /// Append string data to the output.
-    fn write_str(&mut self, s: &str) -> Result<(), Error>;
-
-    /// Append bytes data to the output.
-    fn write_bytes(&mut self, b: &[u8]) -> Result<(), Error>;
-
-    /// Append formatted data to the output. This method allows
-    /// [`Output`] objects to be used as the destination of a [`write!`] call.
-    fn write_fmt(&mut self, fmt: fmt::Arguments<'_>) -> Result<(), Error> {
-        if let Some(s) = fmt.as_str() {
-            return self.write_str(s);
-        }
-        struct Adapter<T> {
-            output: T,
-            result: Result<(), Error>,
-        }
-
-        impl<T: Output> fmt::Write for Adapter<T> {
-            fn write_str(&mut self, s: &str) -> fmt::Result {
-                self.output.write_str(s).map_err(|err| {
-                    self.result = Err(err);
-                    fmt::Error
-                })
-            }
-        }
-
-        let mut adapter = Adapter {
-            output: self,
-            result: Ok(()),
-        };
-
-        let res = fmt::write(&mut adapter, fmt);
-
-        debug_assert!(match adapter.result.as_ref() {
-            Ok(()) => res.is_ok(),
-            Err(_) => res.is_err(),
-        });
-
-        adapter.result
-    }
-
-    // TODO: vectored write support
-}
-
-trait Writable {
-    fn write_to_output(&self, output: &mut impl Output) -> Result<(), Error>;
-
-    #[must_use]
-    fn len(&self) -> usize;
-
-    #[must_use]
-    fn safe(&self) -> bool;
-}
-
-impl Writable for [u8] {
-    #[inline]
-    fn write_to_output(&self, output: &mut impl Output) -> Result<(), Error> {
-        output.write_bytes(self)
-    }
-
-    #[inline]
-    #[must_use]
-    fn len(&self) -> usize {
-        self.len()
-    }
-
-    #[inline]
-    #[must_use]
-    fn safe(&self) -> bool {
-        memchr2(b'\r', b'\n', self).is_none()
-    }
-}
-
-impl Writable for str {
-    #[inline]
-    fn write_to_output(&self, output: &mut impl Output) -> Result<(), Error> {
-        output.write_str(self)
-    }
-
-    #[inline]
-    #[must_use]
-    fn len(&self) -> usize {
-        self.len()
-    }
-
-    #[inline]
-    #[must_use]
-    fn safe(&self) -> bool {
-        self.as_bytes().safe()
-    }
-}
-
-impl<T: Output + ?Sized> Output for &mut T {
-    #[inline]
-    fn write_str(&mut self, s: &str) -> Result<(), Error> {
-        T::write_str(*self, s)
-    }
-
-    #[inline]
-    fn write_bytes(&mut self, b: &[u8]) -> Result<(), Error> {
-        T::write_bytes(*self, b)
-    }
-
-    #[inline]
-    fn write_fmt(&mut self, fmt: fmt::Arguments<'_>) -> Result<(), Error> {
-        T::write_fmt(*self, fmt)
-    }
-
-    #[inline]
-    fn reserve(&mut self, count: usize) {
-        T::reserve(*self, count)
-    }
-}
-
-impl Output for Vec<u8> {
-    #[inline]
-    fn write_str(&mut self, s: &str) -> Result<(), Error> {
-        self.write_bytes(s.as_bytes())
-    }
-
-    #[inline]
-    fn write_bytes(&mut self, s: &[u8]) -> Result<(), Error> {
-        self.extend_from_slice(s);
-        Ok(())
-    }
-
-    #[inline]
-    fn reserve(&mut self, count: usize) {
-        self.reserve(count)
-    }
-}
-
-impl Output for String {
-    #[inline]
-    fn write_str(&mut self, s: &str) -> Result<(), Error> {
-        self.push_str(s);
-        Ok(())
-    }
-
-    #[inline]
-    fn write_bytes(&mut self, b: &[u8]) -> Result<(), Error> {
-        self.write_str(std::str::from_utf8(b).map_err(|_| Error::Utf8Encode)?)
-    }
-
-    #[inline]
-    fn reserve(&mut self, count: usize) {
-        self.reserve(count)
-    }
-}
-
-/// [`Output`] adapter type for serializing to an [`io::Write`] object, such as a file
-/// or pipeline.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct IoWrite<T>(pub T);
-
-impl<T: io::Write> Output for IoWrite<T> {
-    #[inline]
-    fn reserve(&mut self, _count: usize) {}
-
-    #[inline]
-    fn write_str(&mut self, s: &str) -> Result<(), Error> {
-        self.write_bytes(s.as_bytes())
-    }
-
-    #[inline]
-    fn write_bytes(&mut self, b: &[u8]) -> Result<(), Error> {
-        self.0.write_all(b).map_err(Error::Io)
-    }
-
-    #[inline]
-    fn write_fmt(&mut self, fmt: fmt::Arguments<'_>) -> Result<(), Error> {
-        self.0.write_fmt(fmt).map_err(Error::Io)
-    }
 }
 
 /// A RESP Serializer.
@@ -602,78 +419,6 @@ impl ser::Error for Error {
     }
 }
 
-/// Write a redis header containing `value` to the `output`, using the `prefix`.
-/// This method will reserve space in the `output` sufficient to contain the
-/// header, plus additional space equal to `suffix_reserve`.
-fn serialize_header(
-    output: &mut impl Output,
-    prefix: u8,
-    value: impl TryInto<i64>,
-    suffix_reserve: usize,
-) -> Result<(), Error> {
-    let prefix = prefix as char;
-    debug_assert!("*:$".contains(prefix));
-
-    let value: i64 = value.try_into().map_err(|_| Error::NumberOutOfRange)?;
-
-    // TODO: better calculation how many digits / characters are required for
-    // `value`. This can be based on ilog10 but there's a bunch of edge cases
-    // that need to be handled (zero, negatives). For now we conservatively
-    // assume it fits in 1 character.
-    let width = suffix_reserve.saturating_add(4);
-
-    output.reserve(width);
-    write!(output, "{prefix}{value}\r\n")
-}
-
-#[inline]
-fn serialize_number(output: &mut impl Output, value: impl TryInto<i64>) -> Result<(), Error> {
-    serialize_header(output, b':', value, 0)
-}
-
-/// Given an array of length `len`, estimate how many bytes are reasonable
-/// to reserve in an output buffer that will contain that array. This should
-/// *mostly* be the lower bound but can make certain practical estimates about
-/// the data that is *likely* to be contained.
-#[inline]
-#[must_use]
-const fn estimate_array_reservation(len: usize) -> usize {
-    // By far the most common thing we serialize is a bulk string (for a
-    // command), and the smallest bulk string (an empty one) is 6 bytes, so
-    // that's the factor we use.
-    len.saturating_mul(6)
-}
-
-#[inline]
-fn serialize_array_header(output: &mut impl Output, len: usize) -> Result<(), Error> {
-    serialize_header(output, b'*', len, estimate_array_reservation(len))
-}
-
-fn serialize_bulk_string(
-    output: &mut impl Output,
-    value: &(impl Writable + ?Sized),
-) -> Result<(), Error> {
-    let len: i64 = value
-        .len()
-        .try_into()
-        .map_err(|_| Error::NumberOutOfRange)?;
-
-    serialize_header(output, b'$', len, value.len().saturating_add(2))?;
-    value.write_to_output(output)?;
-    output.write_str("\r\n")
-}
-
-fn serialize_error(dest: &mut impl Output, value: &(impl Writable + ?Sized)) -> Result<(), Error> {
-    if value.safe() {
-        dest.reserve(value.len().saturating_add(3));
-        dest.write_str("-")?;
-        value.write_to_output(dest)?;
-        dest.write_str("\r\n")
-    } else {
-        Err(Error::BadSimpleString)
-    }
-}
-
 impl<'a, O, U> ser::Serializer for BaseSerializer<'a, O, U>
 where
     O: Output,
@@ -694,57 +439,57 @@ where
 
     #[inline]
     fn serialize_bool(self, v: bool) -> Result<Self::Ok, Self::Error> {
-        serialize_number(self.output, if v { 1 } else { 0 })
+        primitives::serialize_number(self.output, if v { 1 } else { 0 })
     }
 
     #[inline]
     fn serialize_i8(self, v: i8) -> Result<Self::Ok, Self::Error> {
-        serialize_number(self.output, v)
+        primitives::serialize_number(self.output, v)
     }
 
     #[inline]
     fn serialize_i16(self, v: i16) -> Result<Self::Ok, Self::Error> {
-        serialize_number(self.output, v)
+        primitives::serialize_number(self.output, v)
     }
 
     #[inline]
     fn serialize_i32(self, v: i32) -> Result<Self::Ok, Self::Error> {
-        serialize_number(self.output, v)
+        primitives::serialize_number(self.output, v)
     }
 
     #[inline]
     fn serialize_i64(self, v: i64) -> Result<Self::Ok, Self::Error> {
-        serialize_number(self.output, v)
+        primitives::serialize_number(self.output, v)
     }
 
     #[inline]
     fn serialize_i128(self, v: i128) -> Result<Self::Ok, Self::Error> {
-        serialize_number(self.output, v)
+        primitives::serialize_number(self.output, v)
     }
 
     #[inline]
     fn serialize_u8(self, v: u8) -> Result<Self::Ok, Self::Error> {
-        serialize_number(self.output, v)
+        primitives::serialize_number(self.output, v)
     }
 
     #[inline]
     fn serialize_u16(self, v: u16) -> Result<Self::Ok, Self::Error> {
-        serialize_number(self.output, v)
+        primitives::serialize_number(self.output, v)
     }
 
     #[inline]
     fn serialize_u32(self, v: u32) -> Result<Self::Ok, Self::Error> {
-        serialize_number(self.output, v)
+        primitives::serialize_number(self.output, v)
     }
 
     #[inline]
     fn serialize_u64(self, v: u64) -> Result<Self::Ok, Self::Error> {
-        serialize_number(self.output, v)
+        primitives::serialize_number(self.output, v)
     }
 
     #[inline]
     fn serialize_u128(self, v: u128) -> Result<Self::Ok, Self::Error> {
-        serialize_number(self.output, v)
+        primitives::serialize_number(self.output, v)
     }
 
     #[inline]
@@ -765,7 +510,7 @@ where
 
     #[inline]
     fn serialize_str(self, v: &str) -> Result<Self::Ok, Self::Error> {
-        serialize_bulk_string(self.output, v)
+        primitives::serialize_bulk_string(self.output, v)
     }
 
     fn collect_str<T: ?Sized>(self, value: &T) -> Result<Self::Ok, Self::Error>
@@ -788,7 +533,7 @@ where
 
     #[inline]
     fn serialize_bytes(self, v: &[u8]) -> Result<Self::Ok, Self::Error> {
-        serialize_bulk_string(self.output, v)
+        primitives::serialize_bulk_string(self.output, v)
     }
 
     #[inline]
@@ -861,7 +606,7 @@ where
     }
 
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
-        serialize_array_header(self.output, len)?;
+        primitives::serialize_array_header(&mut *self.output, len)?;
         Ok(TupleSeqAdapter::new(SerializeSeq::new(self.output, len)))
     }
 
@@ -945,7 +690,7 @@ where
     where
         T: serde::Serialize,
     {
-        let reserve = estimate_array_reservation(self.remaining);
+        let reserve = primitives::estimate_array_reservation(self.remaining);
 
         match self.remaining.checked_sub(1) {
             Some(remain) => self.remaining = remain,
@@ -967,23 +712,17 @@ where
 
 /// An error serializer only accepts strings / bytes or similar payloads and
 /// serializes them as Redis error values.
-struct SerializeResultError<'a, O> {
-    output: &'a mut O,
+struct SerializeResultError<O> {
+    output: O,
 }
 
-impl<'a, O> SerializeResultError<'a, O>
-where
-    O: Output,
-{
-    pub fn new(output: &'a mut O) -> Self {
+impl<O: Output> SerializeResultError<O> {
+    pub fn new(output: O) -> Self {
         Self { output }
     }
 }
 
-impl<O> ser::Serializer for SerializeResultError<'_, O>
-where
-    O: Output,
-{
+impl<O: Output> ser::Serializer for SerializeResultError<O> {
     type Ok = ();
     type Error = Error;
 
@@ -1068,11 +807,11 @@ where
 
     #[inline]
     fn serialize_str(self, v: &str) -> Result<Self::Ok, Self::Error> {
-        serialize_error(self.output, v)
+        primitives::serialize_error(self.output, v)
     }
 
     fn serialize_bytes(self, v: &[u8]) -> Result<Self::Ok, Self::Error> {
-        serialize_error(self.output, v)
+        primitives::serialize_error(self.output, v)
     }
 
     #[inline]
@@ -1359,6 +1098,11 @@ mod tests {
     #[test]
     fn test_result_error() {
         test_result_serializer::<(), &str>(Err("ERROR bad data"), b"-ERROR bad data\r\n")
+    }
+
+    #[test]
+    fn test_result_array() {
+        test_result_serializer::<((), i32), &str>(Ok(((), 10)), b"*2\r\n$-1\r\n:10\r\n")
     }
 
     #[test]
